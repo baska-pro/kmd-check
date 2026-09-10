@@ -210,17 +210,20 @@ export const installRuntimeHardening = (store: StoreApi) => {
 
   const runManagementAction = async (action: string, payload: any) => {
     if (!navigator.onLine) throw new Error('Perubahan data membutuhkan koneksi ke Spreadsheet.');
+    if (store.getState().isUpdating) throw new Error('Masih ada perubahan yang sedang disimpan. Tunggu sampai selesai.');
     store.setState({ isUpdating: true, error: null });
+    let shouldRefresh = false;
     try {
       const data = await postGas({ action, payload });
       if (data && typeof data === 'object') applyServerData(store, data);
-      else await fetchData(false);
+      else shouldRefresh = true;
     } catch (error: any) {
       store.setState({ error: error?.message || 'Perubahan data gagal.' });
       throw error;
     } finally {
       store.setState({ isUpdating: false, isLoading: false, lastWriteTime: Date.now() });
     }
+    if (shouldRefresh) await fetchData(false);
   };
 
   const addLog = async (actionName: string, details: string) => {
@@ -236,8 +239,17 @@ export const installRuntimeHardening = (store: StoreApi) => {
 
   const deleteLog = async (id: string) => {
     if (!navigator.onLine) throw new Error('Hapus log membutuhkan koneksi ke Spreadsheet.');
-    const data = await postGas({ action: 'deleteLog', id });
-    if (data && typeof data === 'object') applyServerData(store, data);
+    if (store.getState().isUpdating) throw new Error('Masih ada perubahan yang sedang diproses.');
+    store.setState({ isUpdating: true, error: null });
+    try {
+      const data = await postGas({ action: 'deleteLog', id });
+      if (data && typeof data === 'object') applyServerData(store, data);
+    } catch (error: any) {
+      store.setState({ error: error?.message || 'Gagal menghapus log.' });
+      throw error;
+    } finally {
+      store.setState({ isUpdating: false, lastWriteTime: Date.now() });
+    }
   };
 
   // Offline queue is intentionally disabled. The app must never pretend local data is authoritative.
