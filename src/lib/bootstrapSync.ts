@@ -66,13 +66,45 @@ const sanitizeSystemStatusForOffline = (systemStatus: any) => {
   return safeStatus;
 };
 
+/**
+ * Enforce the operational invariant used by the checklist:
+ * target=0 => no center; progress>=target => completed; partial progress => partial;
+ * otherwise not uploaded. This prevents yesterday's textual status from surviving
+ * when today's progress/target no longer supports it.
+ */
+const canonicalizeOperationalStaff = (staff: any[]): any[] => {
+  return staff.map((item: any) => {
+    const target = Math.max(0, Number(item?.jumlahCenter) || 0);
+    const progress = Math.max(0, Number(item?.progressCenter) || 0);
+    let statusUpload = 'Belum upload';
+
+    if (target === 0) statusUpload = 'Tidak ada Center';
+    else if (progress >= target) statusUpload = 'Sudah upload semua';
+    else if (progress > 0) statusUpload = 'Sebagian upload';
+
+    return {
+      ...item,
+      jumlahCenter: target,
+      progressCenter: progress,
+      statusUpload,
+    };
+  });
+};
+
+const applyCanonicalOperationalState = (store: any) => {
+  const state = store.getState();
+  if (!Array.isArray(state.staff) || state.staff.length === 0) return;
+  const canonical = canonicalizeOperationalStaff(state.staff);
+  store.setState({ staff: canonical });
+};
+
 const saveSameDaySnapshot = (state: any) => {
   try {
     const today = getWIBDateStringSafe();
     const snapshot = {
       date: today,
       savedAt: Date.now(),
-      staff: Array.isArray(state.staff) ? state.staff : [],
+      staff: Array.isArray(state.staff) ? canonicalizeOperationalStaff(state.staff) : [],
       systemStatus: sanitizeSystemStatusForOffline(state.systemStatus),
       options: state.options || {},
       companyProfile: Array.isArray(state.companyProfile) ? state.companyProfile : [],
@@ -161,11 +193,64 @@ const postGas = async (payload: any): Promise<any | null> => {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return await response.json();
   } catch (error) {
-    console.error('[Sync] GAS reconciliation failed:', error);
+    console.error('[Sync] GAS request failed:', error);
     return null;
   } finally {
     window.clearTimeout(timeout);
   }
+};
+
+/**
+ * Remove the client-side emergency/offline login bypass. Authentication must be
+ * confirmed by GAS; a network failure must never grant ADMIN access.
+ */
+const installServerOnlyLogin = (store: any) => {
+  const secureLogin = async (username: string, password: string) => {
+    const cleanUsername = String(username || '').trim();
+    const cleanPassword = String(password || '');
+    if (!cleanUsername || !cleanPassword) {
+      throw new Error('Username dan password wajib diisi.');
+    }
+    if (!navigator.onLine) {
+      throw new Error('Login membutuhkan koneksi ke server.');
+    }
+
+    store.setState({ isLoading: true, error: null });
+    try {
+      const result = await postGas({ action: 'login', username: cleanUsername, password: cleanPassword });
+      if (!result?.success || !result?.data?.username || !result?.data?.role) {
+        throw new Error(result?.error || 'Login gagal. Periksa username dan password.');
+      }
+
+      store.getState().setUser({
+        username: String(result.data.username),
+        role: result.data.role === 'ADMIN' ? 'ADMIN' : 'USER',
+      });
+      await store.getState().fetchData(true);
+    } catch (error: any) {
+      const message = error?.message || 'Login gagal.';
+      store.setState({ error: message });
+      throw error;
+    } finally {
+      store.setState({ isLoading: false });
+    }
+  };
+
+  store.setState({ login: secureLogin });
+};
+
+/**
+ * Notifications are backend-owned. Keeping Telegram in both React and GAS caused
+ * duplicate messages and exposed bot credentials to the browser bundle/state.
+ */
+const installBackendOnlyNotifications = (store: any) => {
+  const backendOwnedNotification = async (..._args: any[]) => undefined;
+  store.setState({
+    sendTelegramNotification: backendOwnedNotification,
+    sendTelegramProgressUpdate: backendOwnedNotification,
+    sendWhatsAppNotification: backendOwnedNotification,
+    sendWhatsAppProgressUpdate: backendOwnedNotification,
+  });
 };
 
 /**
@@ -204,6 +289,7 @@ const reconcileDailyBoundary = async (store: any, baseFetch: (silent?: boolean) 
 
     if (result?.success) {
       await baseFetch(true);
+      applyCanonicalOperationalState(store);
     }
     return;
   }
@@ -225,6 +311,7 @@ const reconcileDailyBoundary = async (store: any, baseFetch: (silent?: boolean) 
       await postGas({ action: 'updateSystem', updates: { lastResetDate: today } });
     }
     await baseFetch(false);
+    applyCanonicalOperationalState(store);
   }
 };
 
@@ -245,6 +332,7 @@ export const bootstrapDataSynchronization = async (store: any) => {
   }
 
   sanitizePersistedServerState();
+  installBackendOnlyNotifications(store);
 
   const initialState = store.getState();
   const baseFetch = initialState.fetchData as (silent?: boolean) => Promise<void>;
@@ -257,6 +345,7 @@ export const bootstrapDataSynchronization = async (store: any) => {
 
     inFlight = (async () => {
       await baseFetch(silent);
+      applyCanonicalOperationalState(store);
       const next = store.getState();
       if (!next.error && Array.isArray(next.staff) && next.staff.length > 0) {
         lastCompletedAt = Date.now();
@@ -273,6 +362,7 @@ export const bootstrapDataSynchronization = async (store: any) => {
 
   // App.tsx and Dashboard.tsx both currently poll. Coalesce them into one network read window.
   store.setState({ fetchData: coalescedFetch });
+  installServerOnlyLogin(store);
 
   // Never render DEFAULT_STAFF_LIST or yesterday's persisted server state as if it were live.
   store.setState({
@@ -297,7 +387,7 @@ export const bootstrapDataSynchronization = async (store: any) => {
     const snapshot = readSameDaySnapshot();
     if (snapshot) {
       store.setState({
-        staff: snapshot.staff || [],
+        staff: canonicalizeOperationalStaff(snapshot.staff || []),
         systemStatus: snapshot.systemStatus || null,
         options: snapshot.options || {},
         companyProfile: snapshot.companyProfile || [],
@@ -310,10 +400,12 @@ export const bootstrapDataSynchronization = async (store: any) => {
       });
       console.warn('[Sync] GAS unavailable. Restored same-day offline snapshot only.');
     }
+    sanitizePersistedServerState();
     return;
   }
 
   await reconcileDailyBoundary(store, baseFetch);
+  applyCanonicalOperationalState(store);
   current = store.getState();
   if (!current.error && Array.isArray(current.staff) && current.staff.length > 0) {
     saveSameDaySnapshot(current);
