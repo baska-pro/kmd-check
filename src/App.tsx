@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   Bell,
   BellOff,
@@ -19,7 +19,6 @@ import {
   Users,
   Volume2,
   VolumeX,
-  Wifi,
   WifiOff,
   X,
 } from 'lucide-react';
@@ -118,7 +117,7 @@ export default function App() {
     };
   }, [fetchData, syncOfflineQueue]);
 
-  // Dashboard already performs background polling. App only refreshes when the tab becomes active.
+  // Dashboard owns interval polling. App only refreshes when the tab becomes active.
   useEffect(() => {
     if (!user) return;
     const onFocus = () => fetchData(true).catch(console.error);
@@ -133,7 +132,7 @@ export default function App() {
     };
   }, [user, fetchData]);
 
-  // Direct PIN-token access remains supported, but no UI/global loading overlay is used.
+  // Direct PIN-token access remains supported without a global blocking overlay.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const token = params.get('pin');
@@ -156,7 +155,7 @@ export default function App() {
     else localStorage.removeItem('kmd_screen_locked');
   }, [user, isScreenLocked]);
 
-  // Lightweight inactivity lock; no countdown animation or recurring render loop.
+  // Lightweight inactivity lock; avoids a per-second countdown render loop.
   useEffect(() => {
     if (!user || isScreenLocked) return;
     const minutes = getAutoLockTimeout();
@@ -297,7 +296,7 @@ export default function App() {
   );
 }
 
-function MenuButton({ label, icon, onClick, danger = false }: { label: string; icon: React.ReactNode; onClick: () => void; danger?: boolean }) {
+function MenuButton({ label, icon, onClick, danger = false }: { label: string; icon: ReactNode; onClick: () => void; danger?: boolean }) {
   return (
     <button onClick={onClick} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-xs font-bold transition ${danger ? 'text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/30' : 'text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800'}`}>
       {icon}
