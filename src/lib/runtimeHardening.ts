@@ -60,6 +60,33 @@ const mergeLogs = (current: any[], incoming: any[]) => {
     .slice(0, 300);
 };
 
+const normalizeAuthoritativeStaff = (rawStaff: any[]) => {
+  const normalized = normalizeStaffArray(rawStaff || []);
+
+  return normalized.map((item: any, index: number) => {
+    const raw = rawStaff?.[index] || {};
+    const rawTarget = raw.jumlahCenter ?? raw.JumlahCenter ?? raw.targetCenter ?? raw.target;
+    const parsedTarget = Number(rawTarget);
+    const target = Number.isFinite(parsedTarget) && rawTarget !== '' && rawTarget !== null && rawTarget !== undefined
+      ? Math.max(0, parsedTarget)
+      : Math.max(0, Number(item.jumlahCenter) || 0);
+
+    const progress = Math.max(0, Number(item.progressCenter) || 0);
+    let statusUpload: 'Belum upload' | 'Sebagian upload' | 'Sudah upload semua' | 'Tidak ada Center' = 'Belum upload';
+
+    if (target === 0) statusUpload = 'Tidak ada Center';
+    else if (progress >= target) statusUpload = 'Sudah upload semua';
+    else if (progress > 0) statusUpload = 'Sebagian upload';
+
+    return {
+      ...item,
+      jumlahCenter: target,
+      progressCenter: progress,
+      statusUpload,
+    };
+  });
+};
+
 export const installRuntimeHardening = (store: StoreApi) => {
   const fetchData = async (silent = false) => {
     if (!GAS_URL || !navigator.onLine) return;
@@ -76,7 +103,8 @@ export const installRuntimeHardening = (store: StoreApi) => {
         const current = store.getState();
         if (current.isUpdating) return;
 
-        const staff = normalizeStaffArray(data?.staff || []);
+        const rawStaff = Array.isArray(data?.staff) ? data.staff : [];
+        const staff = normalizeAuthoritativeStaff(rawStaff);
         const systemStatus = normalizeSystemStatus(data?.systemStatus || {});
         const options = normalizeOptions(data?.options || {});
         const companyProfile = normalizeCompanyProfile(data?.companyProfile || []);
