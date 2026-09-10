@@ -1,0 +1,874 @@
+name: Apply KMD CRUD Hotfix
+
+on:
+  push:
+    branches:
+      - hotfix/gas-storage-staff-update
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-validate:
+    if: ${{ !contains(github.event.head_commit.message, '[skip hotfix]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: hotfix/gas-storage-staff-update
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Apply backend and UI hotfix
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          def replace_function(text, name, replacement):
+              pattern = re.compile(r'^function\s+' + re.escape(name) + r'\s*\([^\n]*\)\s*\{.*?(?=^function\s+[A-Za-z0-9_]+\s*\(|\Z)', re.M | re.S)
+              new_text, count = pattern.subn(replacement.rstrip() + '\n\n', text, count=1)
+              if count != 1:
+                  raise SystemExit(f'Could not replace function {name}: {count}')
+              return new_text
+
+          code_path = Path('public/gas/Code.gs')
+          code = code_path.read_text()
+          code = re.sub(r'const SCRIPT_VERSION = "[^"]+";', 'const SCRIPT_VERSION = "2.2";\nconst KMD_DATABASE_ID = "1QWUYC-xo8btMWbJtl0FUoUKR04xe1_1M2RZzucAO8ds";', code, count=1)
+
+          code = replace_function(code, 'getDB', r'''function getDB() {
+            // Database produksi adalah satu-satunya source of truth.
+            // Tidak memakai PropertiesService sehingga error storage internal Google
+            // tidak dapat mengalihkan aplikasi ke database lain.
+            try {
+              return SpreadsheetApp.openById(KMD_DATABASE_ID);
+            } catch (e) {
+              throw new Error('KMD Check Database tidak dapat dibuka: ' + (e.message || e));
+            }
+          }''')
+
+          code = replace_function(code, 'setup', r'''function setup() {
+            var ss = getDB();
+            var requiredSheets = ["Users", "Staff", "Options", "SystemStatus", "CompanyProfile", "ActivityLog", "Transactions"];
+            requiredSheets.forEach(function(name) {
+              if (!ss.getSheetByName(name)) throw new Error('Sheet wajib tidak ditemukan: ' + name);
+            });
+
+            var staffSheet = ss.getSheetByName('Staff');
+            _ensureAndFixStaffHeaders(staffSheet);
+            var headers = staffSheet.getRange(1, 1, 1, staffSheet.getLastColumn()).getDisplayValues()[0];
+            var lowerHeaders = headers.map(function(h) { return String(h || '').toLowerCase().replace(/\s+/g, ''); });
+            var nikColumn = _resolveColumnIndexForField(lowerHeaders, 'nik');
+            if (nikColumn !== -1 && staffSheet.getMaxRows() > 1) {
+              staffSheet.getRange(2, nikColumn + 1, staffSheet.getMaxRows() - 1, 1).setNumberFormat('@');
+            }
+            return 'KMD Check Database siap: ' + ss.getName() + ' (' + ss.getId() + ')';
+          }''')
+
+          code = replace_function(code, 'login', r'''function login(username, password) {
+            var sheet = getDB().getSheetByName("Users");
+            if (!sheet) throw new Error('Sheet Users tidak ditemukan.');
+            var data = sheet.getDataRange().getDisplayValues();
+            var inputUser = String(username || '').trim().toLowerCase();
+            var inputPass = String(password || '').trim();
+            if (!inputUser || !inputPass) throw new Error('Username dan password wajib diisi.');
+
+            for (var i = 1; i < data.length; i++) {
+              var sheetUser = String(data[i][0] || '').trim();
+              var sheetPass = String(data[i][1] || '').trim();
+              if (sheetUser.toLowerCase() === inputUser && sheetPass === inputPass) {
+                return {
+                  username: sheetUser,
+                  role: String(data[i][2] || 'USER').trim().toUpperCase()
+                };
+              }
+            }
+            throw new Error('Username atau password salah');
+          }''')
+
+          code = replace_function(code, 'getData', r'''function getData() {
+            var ss = getDB();
+            var requiredSheets = ["Users", "Staff", "Options", "SystemStatus", "CompanyProfile", "ActivityLog"];
+            requiredSheets.forEach(function(name) {
+              if (!ss.getSheetByName(name)) throw new Error('Sheet wajib tidak ditemukan: ' + name);
+            });
+
+            var staffSheet = ss.getSheetByName("Staff");
+            var staffRange = staffSheet.getDataRange();
+            var staffData = staffRange.getValues();
+            var staffDisplayData = staffRange.getDisplayValues();
+            var staff = [];
+
+            if (staffData.length > 1) {
+              var headers = staffDisplayData[0];
+              var lowerHeaders = headers.map(function(h) { return String(h || '').toLowerCase().replace(/\s+/g, ''); });
+              var indices = _resolveStaffFieldIndices(lowerHeaders);
+
+              var jakartaStr = Utilities.formatDate(new Date(), 'Asia/Jakarta', 'yyyy-MM-dd-HH-mm-ss');
+              var p = jakartaStr.split('-');
+              var jakartaDate = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]), 12, 0, 0);
+              var dayIndex = jakartaDate.getDay();
+              var dayKeys = ['minggu', 'senin', 'selasa', 'rabu', 'kamis', 'jumat', 'sabtu'];
+              var currentDayKey = dayKeys[dayIndex];
+              var idxDay = _resolveColumnIndexForField(lowerHeaders, currentDayKey);
+
+              for (var i = 1; i < staffData.length; i++) {
+                var row = staffData[i];
+                var displayRow = staffDisplayData[i] || [];
+                var nikIdx = indices.nik !== -1 ? indices.nik : 0;
+                var nik = String(displayRow[nikIdx] || '').trim();
+                if (!nik) continue;
+
+                var progressCenter = indices.progressCenter !== -1 ? Number(row[indices.progressCenter] || 0) : 0;
+                if (!isFinite(progressCenter)) progressCenter = 0;
+
+                var dayTarget = null;
+                if (dayIndex >= 1 && dayIndex <= 5 && idxDay !== -1) {
+                  var targetRaw = row[idxDay];
+                  if (targetRaw !== '' && targetRaw !== null && isFinite(Number(targetRaw))) dayTarget = Number(targetRaw);
+                }
+                var fallbackTarget = indices.jumlahCenter !== -1 && isFinite(Number(row[indices.jumlahCenter]))
+                  ? Number(row[indices.jumlahCenter] || 0)
+                  : 0;
+                var jumlahCenter = dayTarget !== null ? dayTarget : fallbackTarget;
+
+                var statusUpload = 'Belum upload';
+                if (jumlahCenter <= 0) statusUpload = 'Tidak ada Center';
+                else if (progressCenter >= jumlahCenter) statusUpload = 'Sudah upload semua';
+                else if (progressCenter > 0) statusUpload = 'Sebagian upload';
+
+                function displayAt(index) {
+                  return index !== -1 ? String(displayRow[index] || '').trim() : '';
+                }
+                function numberAt(index) {
+                  return index !== -1 && isFinite(Number(row[index])) ? Number(row[index] || 0) : 0;
+                }
+
+                staff.push({
+                  nik: nik,
+                  nama: displayAt(indices.nama),
+                  jabatan: displayAt(indices.jabatan) || 'FIELD OFFICER',
+                  statusKerja: displayAt(indices.statusKerja) || 'Di Kantor',
+                  jamBerangkat: displayAt(indices.jamBerangkat),
+                  jamPulang: displayAt(indices.jamPulang),
+                  progressCenter: progressCenter,
+                  jumlahCenter: jumlahCenter,
+                  statusUpload: statusUpload,
+                  keterangan: displayAt(indices.keterangan),
+                  senin: numberAt(indices.senin),
+                  selasa: numberAt(indices.selasa),
+                  rabu: numberAt(indices.rabu),
+                  kamis: numberAt(indices.kamis),
+                  jumat: numberAt(indices.jumat),
+                  tanggalUpdate: displayAt(indices.tanggalUpdate)
+                });
+              }
+            }
+
+            var systemStatus = {};
+            var sysData = ss.getSheetByName('SystemStatus').getDataRange().getValues();
+            for (var s = 1; s < sysData.length; s++) {
+              var key = String(sysData[s][0] || '').trim();
+              if (key) systemStatus[key] = sysData[s][1];
+            }
+
+            var options = {};
+            var optionsData = ss.getSheetByName('Options').getDataRange().getDisplayValues();
+            for (var o = 1; o < optionsData.length; o++) {
+              var cat = String(optionsData[o][0] || '').trim();
+              var val = String(optionsData[o][1] || '').trim();
+              if (!cat || !val) continue;
+              if (!options[cat]) options[cat] = [];
+              if (options[cat].indexOf(val) === -1) options[cat].push(val);
+            }
+
+            var companyProfile = [];
+            var cpData = ss.getSheetByName('CompanyProfile').getDataRange().getDisplayValues();
+            for (var c = 1; c < cpData.length; c++) {
+              if (!String(cpData[c][0] || '').trim() && !String(cpData[c][1] || '').trim()) continue;
+              companyProfile.push({
+                id: String(cpData[c][0] || '').trim(),
+                kategori: String(cpData[c][1] || '').trim(),
+                informasi: String(cpData[c][2] || '').trim(),
+                icon: String(cpData[c][3] || '').trim()
+              });
+            }
+
+            // Password tidak pernah dikirim melalui getData. Login tetap membaca langsung dari sheet Users.
+            var usersList = [];
+            var usersData = ss.getSheetByName('Users').getDataRange().getDisplayValues();
+            for (var u = 1; u < usersData.length; u++) {
+              var username = String(usersData[u][0] || '').trim();
+              if (!username) continue;
+              usersList.push({ username: username, role: String(usersData[u][2] || 'USER').trim().toUpperCase() });
+            }
+
+            return {
+              staff: staff,
+              systemStatus: systemStatus,
+              options: options,
+              companyProfile: companyProfile,
+              usersList: usersList,
+              activityLogs: getFilteredLogs(),
+              serverMeta: {
+                databaseId: KMD_DATABASE_ID,
+                databaseName: ss.getName(),
+                dateWIB: Utilities.formatDate(new Date(), 'Asia/Jakarta', 'yyyy-MM-dd'),
+                timestampWIB: Utilities.formatDate(new Date(), 'Asia/Jakarta', 'yyyy-MM-dd HH:mm:ss')
+              }
+            };
+          }''')
+
+          code = replace_function(code, 'updateStaff', r'''function updateStaff(nik, updates) {
+            var sheet = getDB().getSheetByName('Staff');
+            if (!sheet) throw new Error('Sheet Staff tidak ditemukan.');
+            var range = sheet.getDataRange();
+            var values = range.getValues();
+            var displayValues = range.getDisplayValues();
+            if (values.length < 2) throw new Error('Data Staff kosong.');
+            var headers = displayValues[0];
+            var lowerHeaders = headers.map(function(h) { return String(h || '').toLowerCase().replace(/\s+/g, ''); });
+            var rowIndex = _findStaffRowIndex(displayValues, lowerHeaders, nik);
+            if (rowIndex === -1) throw new Error('Staf NIK: ' + nik + ' tidak ditemukan di KMD Check Database.');
+
+            var changedFields = {};
+            var hasOperationalChange = false;
+            for (var key in (updates || {})) {
+              if (!Object.prototype.hasOwnProperty.call(updates, key)) continue;
+              var colIndex = _resolveColumnIndexForField(lowerHeaders, key);
+              if (colIndex === -1) continue;
+              var cell = sheet.getRange(rowIndex + 1, colIndex + 1);
+              var oldVal = cell.getDisplayValue();
+              var newVal = updates[key];
+              if (newVal === undefined || newVal === null) newVal = '';
+              var cleanKey = String(key).toLowerCase().replace(/[^a-z0-9]/g, '');
+              if (cleanKey === 'nik') {
+                cell.setNumberFormat('@');
+                newVal = String(newVal).trim();
+              }
+              if (String(oldVal).trim() === String(newVal).trim()) continue;
+              cell.setValue(newVal);
+              if (['progresscenter','statuskerja','jamberangkat','jampulang','statusupload','progress','status','upload'].indexOf(cleanKey) !== -1) {
+                changedFields[cleanKey] = { oldVal: oldVal, newVal: newVal };
+                hasOperationalChange = true;
+              }
+            }
+
+            if (hasOperationalChange) {
+              var dateCol = _resolveColumnIndexForField(lowerHeaders, 'tanggalupdate');
+              if (dateCol !== -1) sheet.getRange(rowIndex + 1, dateCol + 1).setValue(new Date());
+            }
+            SpreadsheetApp.flush();
+            logActivity('Update Staff', String(nik) + ' updated');
+
+            if (hasOperationalChange && typeof processStaffNotification === 'function') {
+              try {
+                var updatedVals = sheet.getRange(rowIndex + 1, 1, 1, headers.length).getValues()[0];
+                var namaCol = _resolveColumnIndexForField(lowerHeaders, 'nama');
+                var jabatanCol = _resolveColumnIndexForField(lowerHeaders, 'jabatan');
+                processStaffNotification(
+                  namaCol !== -1 ? String(updatedVals[namaCol] || '').trim() : '',
+                  jabatanCol !== -1 ? String(updatedVals[jabatanCol] || '').trim() : '',
+                  changedFields,
+                  updatedVals,
+                  lowerHeaders
+                );
+              } catch (notifyErr) {
+                Logger.log('Notifikasi staf gagal, tetapi penyimpanan tetap sukses: ' + notifyErr.toString());
+              }
+            }
+            return getData();
+          }''')
+
+          code = replace_function(code, 'bulkUpdateStaff', r'''function bulkUpdateStaff(updatesList) {
+            if (!Array.isArray(updatesList) || updatesList.length === 0) return getData();
+            var sheet = getDB().getSheetByName('Staff');
+            var updated = 0;
+            var errors = [];
+            for (var i = 0; i < updatesList.length; i++) {
+              var item = updatesList[i] || {};
+              try {
+                updateStaff(String(item.nik || '').trim(), item.updates || {});
+                updated++;
+              } catch (e) {
+                errors.push(String(item.nik || '?') + ': ' + (e.message || e));
+              }
+            }
+            if (!updated && errors.length) throw new Error(errors.join(' | '));
+            if (errors.length) Logger.log('Sebagian bulk update gagal: ' + errors.join(' | '));
+            return getData();
+          }''')
+
+          code = replace_function(code, 'getFilteredLogs', r'''function getFilteredLogs() {
+            var sheet = getDB().getSheetByName('ActivityLog');
+            if (!sheet || sheet.getLastRow() <= 1) return [];
+            var data = sheet.getDataRange().getValues();
+            var logs = [];
+            var limit = 300;
+            for (var i = data.length - 1; i >= 1 && logs.length < limit; i--) {
+              var id = String(data[i][0] || '').trim();
+              var timestampVal = data[i][1];
+              var parsed = new Date(timestampVal);
+              logs.push({
+                id: id || ('row:' + (i + 1)),
+                timestamp: isNaN(parsed.getTime()) ? String(timestampVal || '') : parsed.toISOString(),
+                action: String(data[i][2] || ''),
+                details: String(data[i][3] || ''),
+                user: String(data[i][4] || 'System')
+              });
+            }
+            // Membaca log tidak boleh mengubah/menghapus isi Spreadsheet.
+            return logs;
+          }''')
+
+          code = replace_function(code, 'deleteLog', r'''function deleteLog(id) {
+            var sheet = getDB().getSheetByName('ActivityLog');
+            if (!sheet) throw new Error('Sheet ActivityLog tidak ditemukan.');
+            var target = String(id || '').trim();
+            if (!target) throw new Error('ID log tidak valid.');
+            var data = sheet.getDataRange().getDisplayValues();
+            var rowToDelete = -1;
+            for (var i = 1; i < data.length; i++) {
+              if (String(data[i][0] || '').trim() === target) {
+                rowToDelete = i + 1;
+                break;
+              }
+            }
+            if (rowToDelete === -1 && target.indexOf('row:') === 0) {
+              var parsedRow = Number(target.substring(4));
+              if (Number.isInteger(parsedRow) && parsedRow > 1 && parsedRow <= sheet.getLastRow()) rowToDelete = parsedRow;
+            }
+            if (rowToDelete === -1) throw new Error('Log tidak ditemukan atau sudah dihapus.');
+            sheet.deleteRow(rowToDelete);
+            SpreadsheetApp.flush();
+            return getData();
+          }''')
+
+          code = replace_function(code, 'manageCompanyProfile', r'''function manageCompanyProfile(payload) {
+            payload = payload || {};
+            var sheet = getDB().getSheetByName('CompanyProfile');
+            if (!sheet) throw new Error('Sheet CompanyProfile tidak ditemukan.');
+            var actionType = String(payload.actionType || '').trim();
+            var data = sheet.getDataRange().getDisplayValues();
+
+            function findRow(id) {
+              var target = String(id || '').trim();
+              for (var i = 1; i < data.length; i++) if (String(data[i][0] || '').trim() === target) return i + 1;
+              return -1;
+            }
+
+            if (actionType === 'add') {
+              if (!String(payload.kategori || '').trim()) throw new Error('Kategori profil wajib diisi.');
+              sheet.appendRow([Utilities.getUuid(), String(payload.kategori).trim(), String(payload.informasi || '').trim(), String(payload.icon || '🏢').trim()]);
+            } else if (actionType === 'edit') {
+              var row = findRow(payload.id);
+              if (row === -1) throw new Error('Profil yang akan diedit tidak ditemukan.');
+              sheet.getRange(row, 2, 1, 3).setValues([[
+                String(payload.kategori || '').trim(),
+                String(payload.informasi || '').trim(),
+                String(payload.icon || '🏢').trim()
+              ]]);
+            } else if (actionType === 'delete') {
+              var row = findRow(payload.id);
+              if (row === -1) throw new Error('Profil yang akan dihapus tidak ditemukan.');
+              sheet.deleteRow(row);
+            } else {
+              throw new Error('Action profil tidak dikenal: ' + actionType);
+            }
+            SpreadsheetApp.flush();
+            logActivity('Company Profile', actionType + ': ' + String(payload.kategori || payload.id || ''));
+            return getData();
+          }''')
+
+          code = replace_function(code, 'manageUser', r'''function manageUser(payload) {
+            payload = payload || {};
+            var sheet = getDB().getSheetByName('Users');
+            if (!sheet) throw new Error('Sheet Users tidak ditemukan.');
+            var data = sheet.getDataRange().getDisplayValues();
+            var actionType = String(payload.actionType || '').trim();
+            var username = String(payload.username || '').trim();
+
+            function findUserRow(name) {
+              var target = String(name || '').trim().toLowerCase();
+              for (var i = 1; i < data.length; i++) {
+                if (String(data[i][0] || '').trim().toLowerCase() === target) return i + 1;
+              }
+              return -1;
+            }
+            function adminCount() {
+              var count = 0;
+              for (var i = 1; i < data.length; i++) if (String(data[i][2] || '').trim().toUpperCase() === 'ADMIN') count++;
+              return count;
+            }
+
+            if (actionType === 'add') {
+              if (!username) throw new Error('Username wajib diisi.');
+              if (!String(payload.password || '').trim()) throw new Error('Password wajib diisi.');
+              if (findUserRow(username) !== -1) throw new Error('Username sudah ada.');
+              sheet.appendRow([username, String(payload.password), String(payload.role || 'USER').trim().toUpperCase()]);
+            } else if (actionType === 'edit') {
+              var row = findUserRow(username);
+              if (row === -1) throw new Error('User tidak ditemukan: ' + username);
+              var oldRole = String(data[row - 1][2] || 'USER').trim().toUpperCase();
+              var newUsername = String(payload.newUsername || username).trim();
+              var newRole = String(payload.role || oldRole).trim().toUpperCase();
+              if (!newUsername) throw new Error('Username baru tidak boleh kosong.');
+              var conflict = findUserRow(newUsername);
+              if (conflict !== -1 && conflict !== row) throw new Error('Username baru sudah digunakan.');
+              if (oldRole === 'ADMIN' && newRole !== 'ADMIN' && adminCount() <= 1) throw new Error('Admin terakhir tidak dapat diturunkan rolenya.');
+              sheet.getRange(row, 1).setValue(newUsername);
+              if (String(payload.password || '').trim()) sheet.getRange(row, 2).setValue(String(payload.password));
+              sheet.getRange(row, 3).setValue(newRole);
+            } else if (actionType === 'changeRole') {
+              var row = findUserRow(username);
+              if (row === -1) throw new Error('User tidak ditemukan: ' + username);
+              var oldRole = String(data[row - 1][2] || 'USER').trim().toUpperCase();
+              var newRole = String(payload.newRole || 'USER').trim().toUpperCase();
+              if (oldRole === 'ADMIN' && newRole !== 'ADMIN' && adminCount() <= 1) throw new Error('Admin terakhir tidak dapat diturunkan rolenya.');
+              sheet.getRange(row, 3).setValue(newRole);
+            } else if (actionType === 'delete') {
+              var row = findUserRow(username);
+              if (row === -1) throw new Error('User tidak ditemukan: ' + username);
+              if (String(data[row - 1][2] || '').trim().toUpperCase() === 'ADMIN' && adminCount() <= 1) throw new Error('Admin terakhir tidak dapat dihapus.');
+              sheet.deleteRow(row);
+            } else {
+              throw new Error('Action user tidak dikenal: ' + actionType);
+            }
+            SpreadsheetApp.flush();
+            logActivity('User Management', actionType + ': ' + username);
+            return getData();
+          }''')
+
+          code = replace_function(code, 'manageStaff', r'''function manageStaff(payload) {
+            payload = payload || {};
+            var sheet = getDB().getSheetByName('Staff');
+            if (!sheet) throw new Error('Sheet Staff tidak ditemukan.');
+            var range = sheet.getDataRange();
+            var values = range.getValues();
+            var displayValues = range.getDisplayValues();
+            var headers = displayValues[0];
+            var lowerHeaders = headers.map(function(h) { return String(h || '').toLowerCase().replace(/\s+/g, ''); });
+            var actionType = String(payload.actionType || '').trim();
+            var nikIndex = _resolveColumnIndexForField(lowerHeaders, 'nik');
+
+            function setCell(row, field, value, asText) {
+              var col = _resolveColumnIndexForField(lowerHeaders, field);
+              if (col === -1) return;
+              var cell = sheet.getRange(row, col + 1);
+              if (asText) cell.setNumberFormat('@');
+              cell.setValue(value === undefined || value === null ? '' : value);
+            }
+
+            if (actionType === 'add') {
+              var nik = String(payload.nik || '').trim();
+              var nama = String(payload.nama || '').trim();
+              if (!nik || !nama) throw new Error('NIK dan Nama staf wajib diisi.');
+              if (_findStaffRowIndex(displayValues, lowerHeaders, nik) !== -1) throw new Error('NIK sudah terdaftar: ' + nik);
+              var rowNum = sheet.getLastRow() + 1;
+              // Pastikan baris tersedia dan tulis semua field berdasarkan nama header.
+              setCell(rowNum, 'nik', nik, true);
+              setCell(rowNum, 'nama', nama, false);
+              setCell(rowNum, 'jabatan', String(payload.jabatan || 'FIELD OFFICER'), false);
+              setCell(rowNum, 'statusKerja', String(payload.statusKerja || 'Di Kantor'), false);
+              setCell(rowNum, 'jamBerangkat', String(payload.jamBerangkat || ''), false);
+              setCell(rowNum, 'jamPulang', String(payload.jamPulang || ''), false);
+              setCell(rowNum, 'progressCenter', Number(payload.progressCenter) || 0, false);
+              setCell(rowNum, 'jumlahCenter', Number(payload.jumlahCenter) || 0, false);
+              setCell(rowNum, 'statusUpload', String(payload.statusUpload || ((Number(payload.jumlahCenter) || 0) > 0 ? 'Belum upload' : 'Tidak ada Center')), false);
+              setCell(rowNum, 'keterangan', String(payload.keterangan || ''), false);
+              ['senin','selasa','rabu','kamis','jumat'].forEach(function(day) { setCell(rowNum, day, Number(payload[day]) || 0, false); });
+              setCell(rowNum, 'tanggalUpdate', Utilities.formatDate(new Date(), 'Asia/Jakarta', 'yyyy-MM-dd HH:mm:ss'), false);
+              logActivity('Staff Management', 'Menambah staf: ' + nama + ' (NIK: ' + nik + ')');
+            } else if (actionType === 'edit') {
+              var originalNik = String(payload.originalNik || payload.nik || '').trim();
+              var rowIndex = _findStaffRowIndex(displayValues, lowerHeaders, originalNik);
+              if (rowIndex === -1) throw new Error('Staf NIK: ' + originalNik + ' tidak ditemukan.');
+              var rowNum = rowIndex + 1;
+              var newNik = String(payload.nik || originalNik).trim();
+              if (!newNik) throw new Error('NIK staf tidak boleh kosong.');
+              if (getNormalizedNikValue(newNik) !== getNormalizedNikValue(originalNik)) {
+                var conflict = _findStaffRowIndex(displayValues, lowerHeaders, newNik);
+                if (conflict !== -1 && conflict !== rowIndex) throw new Error('NIK baru sudah digunakan staf lain: ' + newNik);
+              }
+              setCell(rowNum, 'nik', newNik, true);
+              if (payload.nama !== undefined) setCell(rowNum, 'nama', String(payload.nama).trim(), false);
+              if (payload.jabatan !== undefined) setCell(rowNum, 'jabatan', payload.jabatan, false);
+              if (payload.statusKerja !== undefined) setCell(rowNum, 'statusKerja', payload.statusKerja, false);
+              if (payload.jamBerangkat !== undefined) setCell(rowNum, 'jamBerangkat', payload.jamBerangkat, false);
+              if (payload.jamPulang !== undefined) setCell(rowNum, 'jamPulang', payload.jamPulang, false);
+              if (payload.progressCenter !== undefined) setCell(rowNum, 'progressCenter', Number(payload.progressCenter) || 0, false);
+              if (payload.jumlahCenter !== undefined) setCell(rowNum, 'jumlahCenter', Number(payload.jumlahCenter) || 0, false);
+              if (payload.statusUpload !== undefined) setCell(rowNum, 'statusUpload', payload.statusUpload, false);
+              if (payload.keterangan !== undefined) setCell(rowNum, 'keterangan', payload.keterangan, false);
+              ['senin','selasa','rabu','kamis','jumat'].forEach(function(day) {
+                if (payload[day] !== undefined) setCell(rowNum, day, Number(payload[day]) || 0, false);
+              });
+              setCell(rowNum, 'tanggalUpdate', Utilities.formatDate(new Date(), 'Asia/Jakarta', 'yyyy-MM-dd HH:mm:ss'), false);
+              logActivity('Staff Management', 'Mengedit staf: ' + originalNik + (newNik !== originalNik ? ' -> ' + newNik : ''));
+            } else if (actionType === 'delete') {
+              var nik = String(payload.nik || '').trim();
+              var rowIndex = _findStaffRowIndex(displayValues, lowerHeaders, nik);
+              if (rowIndex === -1) throw new Error('Staf NIK: ' + nik + ' tidak ditemukan atau sudah dihapus.');
+              sheet.deleteRow(rowIndex + 1);
+              logActivity('Staff Management', 'Menghapus staf NIK: ' + nik);
+            } else {
+              throw new Error('Action staf tidak dikenal: ' + actionType);
+            }
+            SpreadsheetApp.flush();
+            return getData();
+          }''')
+
+          # PropertiesService pada reset tidak boleh menjadi dependency operasional.
+          reset_match = re.search(r'^function resetProgress\([^\n]*\)\s*\{.*?(?=^function\s+[A-Za-z0-9_]+\s*\(|\Z)', code, re.M | re.S)
+          if reset_match:
+              reset = reset_match.group(0)
+              reset = reset.replace('  var props = PropertiesService.getScriptProperties();\n  var lastResetProp = String(props.getProperty("LAST_AUTO_RESET_DATE") || "").trim();', '  var lastResetProp = ""; // SystemStatus.lastResetDate adalah marker utama; tidak bergantung pada ScriptProperties.')
+              reset = reset.replace('    props.setProperty("LAST_AUTO_RESET_DATE", dateToCheck);', '    // Tidak menggunakan ScriptProperties; menghindari kegagalan storage internal Google.')
+              code = code[:reset_match.start()] + reset + '\n\n' + code[reset_match.end():]
+
+          code_path.write_text(code)
+
+          # Binder lama tidak lagi menyentuh PropertiesService.
+          bind = Path('public/gas/KMD_Production_Bind.gs')
+          bind.write_text(r'''const KMD_PRODUCTION_DATABASE_ID = '1QWUYC-xo8btMWbJtl0FUoUKR04xe1_1M2RZzucAO8ds';
+
+/**
+ * Kompatibilitas: Code.gs v2.2 sudah terikat langsung ke database produksi.
+ * Fungsi ini hanya memverifikasi akses dan memperbaiki format NIK menjadi Plain Text.
+ */
+function KMD_BIND_PRODUCTION_DATABASE() {
+  var ss = SpreadsheetApp.openById(KMD_PRODUCTION_DATABASE_ID);
+  if (!ss || ss.getName() !== 'KMD Check Database') throw new Error('KMD Check Database tidak dapat dibuka.');
+  var required = ['Users','Staff','Options','SystemStatus','CompanyProfile','ActivityLog','Transactions'];
+  required.forEach(function(name) { if (!ss.getSheetByName(name)) throw new Error('Sheet wajib tidak ditemukan: ' + name); });
+  var staff = ss.getSheetByName('Staff');
+  var headers = staff.getRange(1, 1, 1, staff.getLastColumn()).getDisplayValues()[0];
+  var nikCol = headers.map(function(v) { return String(v || '').trim().toLowerCase(); }).indexOf('nik');
+  if (nikCol !== -1 && staff.getMaxRows() > 1) staff.getRange(2, nikCol + 1, staff.getMaxRows() - 1, 1).setNumberFormat('@');
+  return { success: true, databaseName: ss.getName(), databaseId: ss.getId(), mode: 'DIRECT_ID', message: 'Database produksi terverifikasi. PropertiesService tidak digunakan.' };
+}
+
+function KMD_VERIFY_PRODUCTION_DATABASE() {
+  var ss = SpreadsheetApp.openById(KMD_PRODUCTION_DATABASE_ID);
+  return {
+    success: !!ss && ss.getName() === 'KMD Check Database',
+    databaseId: ss.getId(),
+    databaseName: ss.getName(),
+    userCount: Math.max(0, ss.getSheetByName('Users').getLastRow() - 1),
+    staffCount: Math.max(0, ss.getSheetByName('Staff').getLastRow() - 1),
+    mode: 'DIRECT_ID'
+  };
+}
+''')
+
+          dash_path = Path('src/components/Dashboard.tsx')
+          dash = dash_path.read_text()
+          dash = dash.replace('Copy, CheckSquare, Sparkles } from \'lucide-react\';', 'Copy, CheckSquare, Sparkles, Loader2 } from \'lucide-react\';')
+          dash = dash.replace('updateSystemStatus, isLoading, fetchData,', 'updateSystemStatus, isLoading, isUpdating, fetchData,', 1)
+
+          state_needle = "  const [editStatusKerja, setEditStatusKerja] = useState('');\n"
+          state_insert = state_needle + r'''
+
+  // Feedback per staf: klik cepat harus langsung terlihat sedang diproses.
+  const [processingStaffNik, setProcessingStaffNik] = useState<string | null>(null);
+  const [recentlySavedStaffNik, setRecentlySavedStaffNik] = useState<string | null>(null);
+  const staffFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (staffFeedbackTimerRef.current) clearTimeout(staffFeedbackTimerRef.current);
+  }, []);
+
+  const runStaffFeedbackAction = async (staffMember: Staff, action: () => Promise<void>, successMessage: string) => {
+    if (processingStaffNik || isUpdating) return;
+    if (staffFeedbackTimerRef.current) clearTimeout(staffFeedbackTimerRef.current);
+    setRecentlySavedStaffNik(null);
+    setProcessingStaffNik(staffMember.nik);
+    const toastId = toast.loading(`Menyimpan ${staffMember.nama} ke Spreadsheet...`);
+    try {
+      await action();
+      setRecentlySavedStaffNik(staffMember.nik);
+      toast.success(successMessage, { id: toastId });
+      staffFeedbackTimerRef.current = setTimeout(() => {
+        setRecentlySavedStaffNik((current) => current === staffMember.nik ? null : current);
+      }, 2200);
+    } catch (error: any) {
+      toast.error(error?.message ? `Gagal menyimpan ${staffMember.nama}: ${error.message}` : `Gagal menyimpan ${staffMember.nama}`, { id: toastId });
+      throw error;
+    } finally {
+      setProcessingStaffNik((current) => current === staffMember.nik ? null : current);
+    }
+  };
+'''
+          if state_needle not in dash: raise SystemExit('Dashboard state insertion point not found')
+          dash = dash.replace(state_needle, state_insert, 1)
+
+          # Handler CRUD: modal ditutup hanya setelah server sukses.
+          old = r'''  const handleCpDeleteSubmit = async () => {
+    if (!cpToDelete) return;
+    await manageCompanyProfile({ actionType: 'delete', id: cpToDelete });
+    setShowDeleteCpModal(false);
+    setCpToDelete(null);
+  };'''
+          new = r'''  const handleCpDeleteSubmit = async () => {
+    if (!cpToDelete || isUpdating) return;
+    try {
+      await manageCompanyProfile({ actionType: 'delete', id: cpToDelete });
+      toast.success('Profil berhasil dihapus dari Spreadsheet.');
+      setShowDeleteCpModal(false);
+      setCpToDelete(null);
+    } catch (error: any) {
+      toast.error(error?.message || 'Gagal menghapus profil.');
+    }
+  };'''
+          if old not in dash: raise SystemExit('CP delete handler not found')
+          dash = dash.replace(old, new, 1)
+
+          old = r'''  const handleResetProgress = async () => {
+    await resetProgress();
+    setShowResetModal(false);
+  };'''
+          new = r'''  const handleResetProgress = async () => {
+    if (isUpdating) return;
+    try {
+      await resetProgress();
+      toast.success('Reset berhasil disimpan ke Spreadsheet.');
+      setShowResetModal(false);
+    } catch (error: any) {
+      toast.error(error?.message || 'Reset gagal.');
+    }
+  };'''
+          dash = dash.replace(old, new, 1)
+
+          old = r'''  const handleDeleteUserSubmit = async () => {
+    if (!userToDelete) return;
+    await manageUser({ actionType: 'delete', username: userToDelete });
+    setShowDeleteUserModal(false);
+    setUserToDelete('');
+  };'''
+          new = r'''  const handleDeleteUserSubmit = async () => {
+    if (!userToDelete || isUpdating) return;
+    try {
+      await manageUser({ actionType: 'delete', username: userToDelete });
+      toast.success(`User ${userToDelete} berhasil dihapus.`);
+      setShowDeleteUserModal(false);
+      setUserToDelete('');
+    } catch (error: any) {
+      toast.error(error?.message || 'Gagal menghapus user.');
+    }
+  };'''
+          dash = dash.replace(old, new, 1)
+
+          old = r'''  const handleChangeRoleSubmit = async () => {
+    if (!userToChangeRole) return;
+    await manageUser({ actionType: 'changeRole', username: userToChangeRole, newRole: newRoleSelection });
+    setShowChangeRoleModal(false);
+    setUserToChangeRole('');
+  };'''
+          new = r'''  const handleChangeRoleSubmit = async () => {
+    if (!userToChangeRole || isUpdating) return;
+    try {
+      await manageUser({ actionType: 'changeRole', username: userToChangeRole, newRole: newRoleSelection });
+      toast.success(`Role ${userToChangeRole} berhasil diubah menjadi ${newRoleSelection}.`);
+      setShowChangeRoleModal(false);
+      setUserToChangeRole('');
+    } catch (error: any) {
+      toast.error(error?.message || 'Gagal mengubah role user.');
+    }
+  };'''
+          dash = dash.replace(old, new, 1)
+
+          # Existing staff confirmation handlers: add explicit success/error feedback.
+          dash = dash.replace("      setNewStaffJumat(0);\n    } catch(err) {\n      // Handled by store\n    }\n  };", "      setNewStaffJumat(0);\n      toast.success('Staf baru berhasil disimpan ke Spreadsheet.');\n    } catch(err: any) {\n      toast.error(err?.message || 'Gagal menambah staf.');\n    }\n  };", 1)
+          dash = dash.replace("      setPendingStaffSavePayload(null);\n    } catch(err) {\n      // Handled by store\n    }\n  };", "      setPendingStaffSavePayload(null);\n      toast.success('Perubahan data staf berhasil disimpan.');\n    } catch(err: any) {\n      toast.error(err?.message || 'Gagal menyimpan perubahan staf.');\n    }\n  };", 1)
+          dash = dash.replace("      setShowDeleteStaffConfirmModal(null);\n    } catch(err) {\n      // Handled by store\n    }\n  };", "      setShowDeleteStaffConfirmModal(null);\n      toast.success('Data staf berhasil dihapus dari Spreadsheet.');\n    } catch(err: any) {\n      toast.error(err?.message || 'Gagal menghapus staf.');\n    }\n  };", 1)
+
+          # Quick staff operations use a visible per-row processing lifecycle.
+          quick_status_old = r'''  const handleQuickStatusKerjaUpdate = async (staff: Staff, newStatus: string) => {
+    const updates: Partial<Staff> = { statusKerja: newStatus as any };
+    if (newStatus === 'Di Lapangan') {
+      updates.jamBerangkat = format(new Date(), 'HH:mm');
+    } else if (newStatus === 'Pulang') {
+      updates.jamPulang = format(new Date(), 'HH:mm');
+    } else if (newStatus === 'Di Kantor') {
+      updates.jamBerangkat = '';
+      updates.jamPulang = '';
+    }
+    await updateStaff(staff.nik, updates);
+  };'''
+          quick_status_new = r'''  const handleQuickStatusKerjaUpdate = async (staff: Staff, newStatus: string) => {
+    if (processingStaffNik || isUpdating) return;
+    const updates: Partial<Staff> = { statusKerja: newStatus as any };
+    if (newStatus === 'Di Lapangan') {
+      updates.jamBerangkat = format(new Date(), 'HH:mm');
+    } else if (newStatus === 'Pulang') {
+      updates.jamPulang = format(new Date(), 'HH:mm');
+    } else if (newStatus === 'Di Kantor') {
+      updates.jamBerangkat = '';
+      updates.jamPulang = '';
+    }
+    try {
+      await runStaffFeedbackAction(staff, () => updateStaff(staff.nik, updates), `Status ${staff.nama} tersimpan: ${newStatus}`);
+    } catch {}
+  };'''
+          if quick_status_old not in dash: raise SystemExit('quick status handler not found')
+          dash = dash.replace(quick_status_old, quick_status_new, 1)
+
+          upload_pattern = re.compile(r"  const handleQuickUploadToggle = async \(staff: Staff\) => \{.*?\n  \};\n\n  const handleQuickProgressUpdate", re.S)
+          upload_replacement = r'''  const handleQuickUploadToggle = async (staff: Staff) => {
+    if (!canEditStaff || isLoading || isUpdating || processingStaffNik) return;
+    if (staff.jumlahCenter === 0) return;
+    const isCompleted = staff.statusUpload === 'Sudah upload semua';
+    const newStatus = isCompleted ? 'Belum upload' : 'Sudah upload semua';
+    const newProgress = isCompleted ? 0 : staff.jumlahCenter;
+    try {
+      await runStaffFeedbackAction(
+        staff,
+        () => updateStaff(staff.nik, { progressCenter: newProgress, statusUpload: newStatus as any }),
+        `${staff.nama}: ${newStatus === 'Sudah upload semua' ? 'Selesai' : 'Belum Mulai'} tersimpan`
+      );
+    } catch {}
+  };
+
+  const handleQuickProgressUpdate'''
+          dash, n = upload_pattern.subn(upload_replacement, dash, count=1)
+          if n != 1: raise SystemExit('quick upload handler replacement failed')
+
+          progress_pattern = re.compile(r"  const handleQuickProgressUpdate = async \(staff: Staff, change: number\) => \{.*?\n  \};\n\n  const handleQuickSystemUpdate", re.S)
+          progress_replacement = r'''  const handleQuickProgressUpdate = async (staff: Staff, change: number) => {
+    if (!canEditStaff || isLoading || isUpdating || processingStaffNik) return;
+    if (staff.jumlahCenter === 0) return;
+    const newProgress = Math.min(Math.max(0, staff.progressCenter + change), staff.jumlahCenter);
+    if (newProgress === staff.progressCenter) return;
+    const newStatus = newProgress === 0 ? 'Belum upload' : newProgress >= staff.jumlahCenter ? 'Sudah upload semua' : 'Sebagian upload';
+    try {
+      await runStaffFeedbackAction(
+        staff,
+        () => updateStaff(staff.nik, { progressCenter: newProgress, statusUpload: newStatus as any }),
+        `Progress ${staff.nama} tersimpan: ${newProgress}/${staff.jumlahCenter}`
+      );
+    } catch {}
+  };
+
+  const handleQuickSystemUpdate'''
+          dash, n = progress_pattern.subn(progress_replacement, dash, count=1)
+          if n != 1: raise SystemExit('quick progress handler replacement failed')
+
+          # Simple staff row shows spinner and explicit Saved state.
+          dash = dash.replace("                      const isBelum = s.statusUpload === 'Belum upload';\n                      const symbol", "                      const isBelum = s.statusUpload === 'Belum upload';\n                      const isProcessing = processingStaffNik === s.nik;\n                      const isJustSaved = recentlySavedStaffNik === s.nik;\n                      const symbol", 1)
+          dash = dash.replace('if (canEditStaff && s.jumlahCenter > 0) {\n                              handleQuickUploadToggle(s);', 'if (canEditStaff && s.jumlahCenter > 0 && !processingStaffNik && !isUpdating) {\n                              handleQuickUploadToggle(s);', 1)
+          dash = dash.replace('"text-sm font-bold truncate transition-colors",', '"text-sm font-bold break-words leading-snug transition-colors",', 1)
+          dash = dash.replace("                              {symbol}\n                            </span>", "                              {isProcessing ? <Loader2 className=\"w-4 h-4 animate-spin text-violet-600\" /> : isJustSaved ? <CheckCircle className=\"w-4 h-4 text-emerald-600\" /> : symbol}\n                            </span>", 1)
+          dash = dash.replace("                              {isSelesai ? 'Selesai' : isBelum ? 'Belum' : s.statusUpload}\n", "                              {isProcessing ? 'Menyimpan…' : isJustSaved ? 'Tersimpan' : isSelesai ? 'Selesai' : isBelum ? 'Belum' : s.statusUpload}\n", 1)
+
+          # All modal mutation buttons must lock against write state, not just login-loading state.
+          dash = dash.replace('disabled={isLoading}', 'disabled={isLoading || isUpdating}')
+          dash = dash.replace("{isLoading ? 'Menghapus...' : <><Trash2", "{(isLoading || isUpdating) ? <><Loader2 className=\"w-3.5 h-3.5 animate-spin\" /> Menghapus...</> : <><Trash2", 1)
+
+          # Delete log modal must stay open on failure.
+          old_log = r'''                onClick={async () => {
+                  try {
+                    await deleteLog(showDeleteLogConfirmModal.id);
+                  } catch (e) {
+                    console.error(e);
+                  } finally {
+                    setShowDeleteLogConfirmModal(null);
+                  }
+                }}'''
+          new_log = r'''                onClick={async () => {
+                  if (isUpdating) return;
+                  try {
+                    await deleteLog(showDeleteLogConfirmModal.id);
+                    toast.success('Log berhasil dihapus dari Spreadsheet.');
+                    setShowDeleteLogConfirmModal(null);
+                  } catch (e: any) {
+                    toast.error(e?.message || 'Gagal menghapus log.');
+                  }
+                }}'''
+          if old_log not in dash: raise SystemExit('delete log handler not found')
+          dash = dash.replace(old_log, new_log, 1)
+
+          dash_path.write_text(dash)
+
+          runtime_path = Path('src/lib/runtimeHardening.ts')
+          runtime = runtime_path.read_text()
+          old_run = r'''  const runManagementAction = async (action: string, payload: any) => {
+    if (!navigator.onLine) throw new Error('Perubahan data membutuhkan koneksi ke Spreadsheet.');
+    store.setState({ isUpdating: true, error: null });
+    try {
+      const data = await postGas({ action, payload });
+      if (data && typeof data === 'object') applyServerData(store, data);
+      else await fetchData(false);
+    } catch (error: any) {
+      store.setState({ error: error?.message || 'Perubahan data gagal.' });
+      throw error;
+    } finally {
+      store.setState({ isUpdating: false, isLoading: false, lastWriteTime: Date.now() });
+    }
+  };'''
+          new_run = r'''  const runManagementAction = async (action: string, payload: any) => {
+    if (!navigator.onLine) throw new Error('Perubahan data membutuhkan koneksi ke Spreadsheet.');
+    if (store.getState().isUpdating) throw new Error('Masih ada perubahan yang sedang disimpan. Tunggu sampai selesai.');
+    store.setState({ isUpdating: true, error: null });
+    let shouldRefresh = false;
+    try {
+      const data = await postGas({ action, payload });
+      if (data && typeof data === 'object') applyServerData(store, data);
+      else shouldRefresh = true;
+    } catch (error: any) {
+      store.setState({ error: error?.message || 'Perubahan data gagal.' });
+      throw error;
+    } finally {
+      store.setState({ isUpdating: false, isLoading: false, lastWriteTime: Date.now() });
+    }
+    if (shouldRefresh) await fetchData(false);
+  };'''
+          if old_run not in runtime: raise SystemExit('runtime management block not found')
+          runtime = runtime.replace(old_run, new_run, 1)
+
+          old_delete = r'''  const deleteLog = async (id: string) => {
+    if (!navigator.onLine) throw new Error('Hapus log membutuhkan koneksi ke Spreadsheet.');
+    const data = await postGas({ action: 'deleteLog', id });
+    if (data && typeof data === 'object') applyServerData(store, data);
+  };'''
+          new_delete = r'''  const deleteLog = async (id: string) => {
+    if (!navigator.onLine) throw new Error('Hapus log membutuhkan koneksi ke Spreadsheet.');
+    if (store.getState().isUpdating) throw new Error('Masih ada perubahan yang sedang diproses.');
+    store.setState({ isUpdating: true, error: null });
+    try {
+      const data = await postGas({ action: 'deleteLog', id });
+      if (data && typeof data === 'object') applyServerData(store, data);
+    } catch (error: any) {
+      store.setState({ error: error?.message || 'Gagal menghapus log.' });
+      throw error;
+    } finally {
+      store.setState({ isUpdating: false, lastWriteTime: Date.now() });
+    }
+  };'''
+          if old_delete not in runtime: raise SystemExit('runtime delete log block not found')
+          runtime = runtime.replace(old_delete, new_delete, 1)
+          runtime_path.write_text(runtime)
+          PY
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: TypeScript check
+        run: npm run lint
+
+      - name: Production build
+        run: npm run build
+
+      - name: Commit validated hotfix and remove temporary workflow
+        shell: bash
+        run: |
+          rm -f .github/workflows/apply-kmd-hotfix.yml
+          git config user.name "KMD Check Automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -m "hotfix: restore GAS CRUD, confirmations and staff feedback [skip hotfix] [skip ci]"
+          git push origin HEAD:hotfix/gas-storage-staff-update
