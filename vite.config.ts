@@ -8,7 +8,7 @@ export default defineConfig(({mode}) => {
   const env = loadEnv(mode, '.', '');
   return {
     plugins: [
-      react(), 
+      react(),
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
@@ -36,21 +36,14 @@ export default defineConfig(({mode}) => {
           ]
         },
         workbox: {
+          // Only versioned/static build assets are cached. The Google Apps Script API
+          // is deliberately excluded so spreadsheet reads can never fall back to a
+          // stale response from a previous day.
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
-          runtimeCaching: [
-            {
-              urlPattern: /^https:\/\/script\.google\.com\/.*/i,
-              handler: 'NetworkFirst',
-              options: {
-                cacheName: 'gas-api-cache',
-                expiration: {
-                  maxEntries: 10,
-                  maxAgeSeconds: 60 * 60 * 24 * 7 // 1 week
-                },
-                networkTimeoutSeconds: 10
-              }
-            }
-          ]
+          cleanupOutdatedCaches: true,
+          clientsClaim: true,
+          skipWaiting: true,
+          runtimeCaching: []
         }
       })
     ],
@@ -64,7 +57,7 @@ export default defineConfig(({mode}) => {
     },
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
+      // Do not modify—file watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
     },
   };
