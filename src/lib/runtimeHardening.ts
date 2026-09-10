@@ -195,6 +195,9 @@ export const installRuntimeHardening = (store: StoreApi) => {
     try {
       const data = await postGas(payload);
       applyServerData(store, data);
+    } catch (error: any) {
+      store.setState({ error: error?.message || 'Gagal memperbarui staf secara massal.' });
+      throw error;
     } finally {
       store.setState({ isUpdating: false, isLoading: false, lastWriteTime: Date.now() });
     }
@@ -228,6 +231,9 @@ export const installRuntimeHardening = (store: StoreApi) => {
     try {
       const data = await postGas({ action: 'resetProgress', isAuto, todayStr });
       applyServerData(store, data);
+    } catch (error: any) {
+      store.setState({ error: error?.message || 'Reset progress gagal.' });
+      throw error;
     } finally {
       store.setState({ isUpdating: false, isLoading: false, lastWriteTime: Date.now() });
     }
@@ -237,18 +243,28 @@ export const installRuntimeHardening = (store: StoreApi) => {
     if (!navigator.onLine) throw new Error('Fitur ini membutuhkan koneksi server.');
     store.setState({ isUpdating: true, error: null });
     try {
-      await postGas({ action, payload });
-      await fetchData(false);
+      const data = await postGas({ action, payload });
+      if (data && typeof data === 'object' && Array.isArray(data.staff)) {
+        applyServerData(store, data);
+      }
+    } catch (error: any) {
+      store.setState({ error: error?.message || 'Perubahan data gagal.' });
+      throw error;
     } finally {
       store.setState({ isUpdating: false, isLoading: false, lastWriteTime: Date.now() });
     }
+    await fetchData(false);
   };
 
   const addLog = async (actionName: string, details: string) => {
     if (!navigator.onLine) return;
     const user = store.getState().user?.username || 'System';
-    await postGas({ action: 'addLog', actionName, details, user });
-    await fetchData(true);
+    try {
+      await postGas({ action: 'addLog', actionName, details, user });
+      await fetchData(true);
+    } catch (error) {
+      console.error('[KMD Log]', error);
+    }
   };
 
   const deleteLog = async (id: string) => {
@@ -263,18 +279,20 @@ export const installRuntimeHardening = (store: StoreApi) => {
     if (originalQueue.length === 0) return;
 
     const remaining = [...originalQueue];
-    store.setState({ isUpdating: true });
+    store.setState({ isUpdating: true, error: null });
     try {
       while (remaining.length > 0) {
-        const item = remaining[0];
-        await postGas(item);
+        await postGas(remaining[0]);
         remaining.shift();
         store.setState({ offlineQueue: [...remaining] });
       }
-      await fetchData(false);
+    } catch (error: any) {
+      store.setState({ error: error?.message || 'Sinkronisasi antrean offline gagal.' });
+      throw error;
     } finally {
       store.setState({ isUpdating: false, isLoading: false });
     }
+    await fetchData(false);
   };
 
   store.setState({
