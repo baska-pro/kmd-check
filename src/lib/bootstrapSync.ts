@@ -13,7 +13,6 @@ const safeUser = (user: any) => {
 
 const safePersistedSlice = (state: any) => ({
   user: safeUser(state?.user),
-  offlineQueue: Array.isArray(state?.offlineQueue) ? state.offlineQueue : [],
   theme: state?.theme === 'dark' ? 'dark' : 'light',
   voiceNotification: !!state?.voiceNotification,
   pushNotification: !!state?.pushNotification,
@@ -34,6 +33,24 @@ export const sanitizePersistedServerState = () => {
   }
 };
 
+export const clearOperationalClientState = (store: any) => {
+  store.setState({
+    staff: [],
+    systemStatus: null,
+    options: {},
+    companyProfile: [],
+    usersList: [],
+    activityLogs: [],
+    offlineQueue: [],
+    lastUpdatedStaff: null,
+    lastUpdatedSystem: null,
+    lastUpdatedCompany: null,
+    lastUpdatedUsers: null,
+    isUpdating: false,
+    error: null,
+  });
+};
+
 const clearLegacyCaches = async () => {
   if (!('caches' in window)) return;
   try {
@@ -49,7 +66,6 @@ const clearLegacyCaches = async () => {
 };
 
 export const bootstrapDataSynchronization = async (store: any) => {
-  // Install the safe runtime functions first. Never clear visible dashboard data here.
   installRuntimeHardening(store);
 
   try {
@@ -57,17 +73,14 @@ export const bootstrapDataSynchronization = async (store: any) => {
   } catch {}
 
   sanitizePersistedServerState();
+  clearOperationalClientState(store);
   await clearLegacyCaches();
 
-  // Initial sync is silent and has a hard timeout in runtimeHardening.
-  // It can fail without blocking the app or leaving a global loading overlay behind.
+  // Only GAS/Spreadsheet may populate operational data.
   await fetchServerDataOnce(store);
 
-  // Defensive cleanup for stale legacy loading flags.
   const state = store.getState();
-  if (!state.isUpdating && state.isLoading) {
-    store.setState({ isLoading: false });
-  }
+  if (!state.isUpdating && state.isLoading) store.setState({ isLoading: false });
 
   sanitizePersistedServerState();
 };
