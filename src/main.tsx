@@ -6,9 +6,14 @@ import App from './App.tsx';
 import './index.css';
 import './ui-fixes.css';
 import { useStore } from './lib/store';
-import { bootstrapDataSynchronization, sanitizePersistedServerState } from './lib/bootstrapSync';
+import {
+  bootstrapDataSynchronization,
+  sanitizePersistedServerState,
+  clearOperationalClientState,
+} from './lib/bootstrapSync';
 
 sanitizePersistedServerState();
+clearOperationalClientState(useStore);
 
 const updateSW = registerSW({
   immediate: true,
@@ -22,7 +27,7 @@ const updateSW = registerSW({
     });
   },
   onOfflineReady() {
-    console.info('[KMD] PWA siap digunakan secara offline.');
+    console.info('[KMD] App shell PWA siap. Data operasional tetap hanya dari GAS/Spreadsheet.');
   },
 });
 
@@ -35,10 +40,13 @@ createRoot(rootElement).render(
   </StrictMode>,
 );
 
-// UI is rendered first. Network/bootstrap work can never block first paint.
 queueMicrotask(() => {
   bootstrapDataSynchronization(useStore).catch((error) => {
     console.error('[KMD Bootstrap]', error);
-    useStore.setState({ isLoading: false, isUpdating: false });
+    useStore.setState({
+      isLoading: false,
+      isUpdating: false,
+      error: error?.message || 'Gagal terhubung ke Spreadsheet.',
+    });
   });
 });

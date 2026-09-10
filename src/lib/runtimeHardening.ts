@@ -5,11 +5,12 @@ import {
   normalizeOptions,
   normalizeStaffArray,
   normalizeSystemStatus,
+  normalizeNikForMatch,
 } from './store';
 
 const GAS_URL = String(import.meta.env.VITE_GAS_URL || '').trim();
-const REQUEST_TIMEOUT_MS = 12000;
-const SILENT_FETCH_GAP_MS = 8000;
+const REQUEST_TIMEOUT_MS = 15000;
+const SILENT_FETCH_GAP_MS = 5000;
 
 type StoreApi = {
   getState: () => any;
@@ -20,8 +21,8 @@ let requestInFlight: Promise<void> | null = null;
 let lastSuccessfulFetch = 0;
 
 const postGas = async (payload: Record<string, unknown>, timeoutMs = REQUEST_TIMEOUT_MS) => {
-  if (!GAS_URL) throw new Error('VITE_GAS_URL belum dikonfigurasi.');
-  if (!navigator.onLine) throw new Error('Perangkat sedang offline.');
+  if (!GAS_URL) throw new Error('VITE_GAS_URL belum dikonfigurasi di deployment aplikasi.');
+  if (!navigator.onLine) throw new Error('Tidak ada koneksi internet. Data KMD hanya dibaca dari Spreadsheet, jadi mode offline tidak digunakan.');
 
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -34,35 +35,26 @@ const postGas = async (payload: Record<string, unknown>, timeoutMs = REQUEST_TIM
       redirect: 'follow',
       signal: controller.signal,
     });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const json = await response.json();
-    if (!json?.success) throw new Error(json?.error || 'Respons GAS tidak valid.');
+    if (!response.ok) throw new Error(`GAS HTTP ${response.status}`);
+    const text = await response.text();
+    let json: any;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      throw new Error('Respons GAS bukan JSON. Periksa URL deployment Web App dan akses deploy-nya.');
+    }
+    if (!json?.success) throw new Error(json?.error || 'Permintaan ke GAS gagal.');
     return json.data;
   } catch (error: any) {
-    if (error?.name === 'AbortError') {
-      throw new Error('Server GAS terlalu lama merespons. Coba beberapa saat lagi.');
-    }
+    if (error?.name === 'AbortError') throw new Error('Server GAS timeout. Coba lagi beberapa saat.');
     throw error;
   } finally {
     window.clearTimeout(timer);
   }
 };
 
-const mergeLogs = (current: any[], incoming: any[]) => {
-  const map = new Map<string, any>();
-  [...(current || []), ...(incoming || [])].forEach((item: any) => {
-    if (!item) return;
-    const key = item.id || `${item.timestamp || ''}-${item.user || ''}-${item.action || ''}-${item.details || ''}`;
-    map.set(String(key), item);
-  });
-  return Array.from(map.values())
-    .sort((a: any, b: any) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-    .slice(0, 300);
-};
-
 const normalizeAuthoritativeStaff = (rawStaff: any[]) => {
   const normalized = normalizeStaffArray(rawStaff || []);
-
   return normalized.map((item: any, index: number) => {
     const raw = rawStaff?.[index] || {};
     const rawTarget = raw.jumlahCenter ?? raw.JumlahCenter ?? raw.targetCenter ?? raw.target;
@@ -77,13 +69,18 @@ const normalizeAuthoritativeStaff = (rawStaff: any[]) => {
     else if (progress >= target) statusUpload = 'Sudah upload semua';
     else if (progress > 0) statusUpload = 'Sebagian upload';
 
-    return { ...item, jumlahCenter: target, progressCenter: progress, statusUpload };
+    return {
+      ...item,
+      nik: String(raw.nik ?? item.nik ?? '').trim(),
+      jumlahCenter: target,
+      progressCenter: progress,
+      statusUpload,
+    };
   });
 };
 
 const applyServerData = (store: StoreApi, data: any) => {
-  if (!data || typeof data !== 'object') return;
-  const current = store.getState();
+  if (!data || typeof data !== 'object') throw new Error('Data GAS kosong atau tidak valid.');
   const rawStaff = Array.isArray(data.staff) ? data.staff : [];
   const activityLogs = normalizeLogsArray(findLogsInData(data));
   const now = new Date();
@@ -94,33 +91,30 @@ const applyServerData = (store: StoreApi, data: any) => {
     options: normalizeOptions(data.options || {}),
     companyProfile: normalizeCompanyProfile(data.companyProfile || []),
     usersList: Array.isArray(data.usersList) ? data.usersList : [],
-    activityLogs: mergeLogs(current.activityLogs, activityLogs),
+    activityLogs,
     lastUpdatedStaff: now,
     lastUpdatedSystem: now,
-    lastUpdatedCompany: current.lastUpdatedCompany || now,
-    lastUpdatedUsers: current.lastUpdatedUsers || now,
+    lastUpdatedCompany: now,
+    lastUpdatedUsers: now,
     error: null,
-  });
-};
-
-const queueOffline = (store: StoreApi, payload: Record<string, unknown>) => {
-  store.setState({
-    offlineQueue: [...(store.getState().offlineQueue || []), payload],
-    isUpdating: false,
-    isLoading: false,
   });
 };
 
 export const installRuntimeHardening = (store: StoreApi) => {
   const fetchData = async (silent = false) => {
-    if (!GAS_URL || !navigator.onLine) return;
-    const state = store.getState();
-    if (state.isUpdating) return;
+    if (!GAS_URL) {
+      if (!silent) store.setState({ error: 'VITE_GAS_URL belum dikonfigurasi.' });
+      return;
+    }
+    if (!navigator.onLine) {
+      if (!silent) store.setState({ error: 'Offline. Data lokal tidak digunakan.' });
+      return;
+    }
+    if (store.getState().isUpdating) return;
     if (silent && Date.now() - lastSuccessfulFetch < SILENT_FETCH_GAP_MS) return;
     if (requestInFlight) return requestInFlight;
 
     if (!silent) store.setState({ error: null });
-
     requestInFlight = (async () => {
       try {
         const data = await postGas({ action: 'getData' });
@@ -130,7 +124,8 @@ export const installRuntimeHardening = (store: StoreApi) => {
         }
       } catch (error: any) {
         console.error('[KMD Sync]', error);
-        if (!silent) store.setState({ error: error?.message || 'Gagal mengambil data.' });
+        store.setState({ error: error?.message || 'Gagal mengambil data Spreadsheet.' });
+        if (!silent) throw error;
       }
     })();
 
@@ -143,42 +138,35 @@ export const installRuntimeHardening = (store: StoreApi) => {
 
   const login = async (username: string, password: string) => {
     const cleanUsername = String(username || '').trim();
-    const cleanPassword = String(password || '');
+    const cleanPassword = String(password || '').trim();
     if (!cleanUsername || !cleanPassword) throw new Error('Username dan password wajib diisi.');
 
     store.setState({ isLoading: true, error: null });
     try {
-      const user = await postGas({ action: 'login', username: cleanUsername, password: cleanPassword }, 12000);
-      if (!user?.username || !user?.role) throw new Error('Respons login tidak valid.');
-      store.getState().setUser({
-        username: String(user.username),
-        role: user.role === 'ADMIN' ? 'ADMIN' : 'USER',
-      });
+      const user = await postGas({ action: 'login', username: cleanUsername, password: cleanPassword }, 15000);
+      if (!user?.username || !user?.role) throw new Error('Respons login dari GAS tidak valid.');
+      store.getState().setUser({ username: String(user.username), role: user.role === 'ADMIN' ? 'ADMIN' : 'USER' });
       await fetchData(true);
     } catch (error: any) {
-      store.setState({ error: error?.message || 'Login gagal.' });
-      throw error;
+      const message = error?.message || 'Login gagal.';
+      store.setState({ error: message });
+      throw new Error(message);
     } finally {
       store.setState({ isLoading: false });
     }
   };
 
   const updateStaff = async (nik: string, updates: Record<string, unknown>) => {
-    const before = store.getState().staff || [];
-    const optimistic = before.map((item: any) => item.nik === nik ? { ...item, ...updates } : item);
-    store.setState({ staff: optimistic, isUpdating: true, lastWriteTime: Date.now(), error: null });
+    if (!navigator.onLine) throw new Error('Update membutuhkan koneksi ke Spreadsheet.');
+    const originalNik = String(nik || '').trim();
+    if (!originalNik) throw new Error('NIK staf tidak valid.');
 
-    const payload = { action: 'updateStaff', nik, updates };
-    if (!navigator.onLine) {
-      queueOffline(store, payload);
-      return;
-    }
-
+    store.setState({ isUpdating: true, error: null, lastWriteTime: Date.now() });
     try {
-      const data = await postGas(payload);
+      const data = await postGas({ action: 'updateStaff', nik: originalNik, updates });
       applyServerData(store, data);
     } catch (error: any) {
-      store.setState({ staff: before, error: error?.message || 'Gagal memperbarui staf.' });
+      store.setState({ error: error?.message || 'Gagal memperbarui staf.' });
       throw error;
     } finally {
       store.setState({ isUpdating: false, isLoading: false, lastWriteTime: Date.now() });
@@ -186,113 +174,75 @@ export const installRuntimeHardening = (store: StoreApi) => {
   };
 
   const updateMultipleStaff = async (updatesList: any[]) => {
-    const payload = { action: 'bulkUpdateStaff', updatesList };
-    if (!navigator.onLine) {
-      queueOffline(store, payload);
-      return;
-    }
+    if (!navigator.onLine) throw new Error('Update membutuhkan koneksi ke Spreadsheet.');
+    const safeList = (updatesList || []).filter((item: any) => item?.nik && item?.updates);
+    if (!safeList.length) return;
     store.setState({ isUpdating: true, error: null });
     try {
-      const data = await postGas(payload);
+      const data = await postGas({ action: 'bulkUpdateStaff', updatesList: safeList });
       applyServerData(store, data);
-    } catch (error: any) {
-      store.setState({ error: error?.message || 'Gagal memperbarui staf secara massal.' });
-      throw error;
     } finally {
       store.setState({ isUpdating: false, isLoading: false, lastWriteTime: Date.now() });
     }
   };
 
   const updateSystemStatus = async (updates: Record<string, unknown>) => {
-    const previous = store.getState().systemStatus;
-    store.setState({
-      systemStatus: { ...(previous || {}), ...updates },
-      isUpdating: true,
-      error: null,
-    });
-    const payload = { action: 'updateSystem', updates };
-    if (!navigator.onLine) {
-      queueOffline(store, payload);
-      return;
-    }
+    if (!navigator.onLine) throw new Error('Update membutuhkan koneksi ke Spreadsheet.');
+    store.setState({ isUpdating: true, error: null });
     try {
-      const data = await postGas(payload);
+      const data = await postGas({ action: 'updateSystem', updates });
       applyServerData(store, data);
-    } catch (error: any) {
-      store.setState({ systemStatus: previous, error: error?.message || 'Gagal memperbarui sistem.' });
-      throw error;
     } finally {
       store.setState({ isUpdating: false, isLoading: false, lastWriteTime: Date.now() });
     }
   };
 
   const resetProgress = async (isAuto = false, todayStr?: string) => {
+    if (!navigator.onLine) throw new Error('Reset membutuhkan koneksi ke Spreadsheet.');
     store.setState({ isUpdating: true, error: null });
     try {
       const data = await postGas({ action: 'resetProgress', isAuto, todayStr });
       applyServerData(store, data);
-    } catch (error: any) {
-      store.setState({ error: error?.message || 'Reset progress gagal.' });
-      throw error;
     } finally {
       store.setState({ isUpdating: false, isLoading: false, lastWriteTime: Date.now() });
     }
   };
 
   const runManagementAction = async (action: string, payload: any) => {
-    if (!navigator.onLine) throw new Error('Fitur ini membutuhkan koneksi server.');
+    if (!navigator.onLine) throw new Error('Perubahan data membutuhkan koneksi ke Spreadsheet.');
     store.setState({ isUpdating: true, error: null });
     try {
       const data = await postGas({ action, payload });
-      if (data && typeof data === 'object' && Array.isArray(data.staff)) {
-        applyServerData(store, data);
-      }
+      if (data && typeof data === 'object') applyServerData(store, data);
+      else await fetchData(false);
     } catch (error: any) {
       store.setState({ error: error?.message || 'Perubahan data gagal.' });
       throw error;
     } finally {
       store.setState({ isUpdating: false, isLoading: false, lastWriteTime: Date.now() });
     }
-    await fetchData(false);
   };
 
   const addLog = async (actionName: string, details: string) => {
     if (!navigator.onLine) return;
     const user = store.getState().user?.username || 'System';
     try {
-      await postGas({ action: 'addLog', actionName, details, user });
-      await fetchData(true);
+      const data = await postGas({ action: 'addLog', actionName, details, user });
+      if (data && typeof data === 'object') applyServerData(store, data);
     } catch (error) {
       console.error('[KMD Log]', error);
     }
   };
 
   const deleteLog = async (id: string) => {
-    if (!navigator.onLine) throw new Error('Hapus log membutuhkan koneksi server.');
-    await postGas({ action: 'deleteLog', id });
-    await fetchData(false);
+    if (!navigator.onLine) throw new Error('Hapus log membutuhkan koneksi ke Spreadsheet.');
+    const data = await postGas({ action: 'deleteLog', id });
+    if (data && typeof data === 'object') applyServerData(store, data);
   };
 
+  // Offline queue is intentionally disabled. The app must never pretend local data is authoritative.
   const syncOfflineQueue = async () => {
-    if (!navigator.onLine) return;
-    const originalQueue = [...(store.getState().offlineQueue || [])];
-    if (originalQueue.length === 0) return;
-
-    const remaining = [...originalQueue];
-    store.setState({ isUpdating: true, error: null });
-    try {
-      while (remaining.length > 0) {
-        await postGas(remaining[0]);
-        remaining.shift();
-        store.setState({ offlineQueue: [...remaining] });
-      }
-    } catch (error: any) {
-      store.setState({ error: error?.message || 'Sinkronisasi antrean offline gagal.' });
-      throw error;
-    } finally {
-      store.setState({ isUpdating: false, isLoading: false });
-    }
-    await fetchData(false);
+    if ((store.getState().offlineQueue || []).length) store.setState({ offlineQueue: [] });
   };
 
   store.setState({
@@ -304,7 +254,11 @@ export const installRuntimeHardening = (store: StoreApi) => {
     resetProgress,
     manageCompanyProfile: (payload: any) => runManagementAction('manageCompanyProfile', payload),
     manageUser: (payload: any) => runManagementAction('manageUser', payload),
-    manageStaff: (payload: any) => runManagementAction('manageStaff', payload),
+    manageStaff: async (payload: any) => {
+      if (payload?.originalNik) payload.originalNik = String(payload.originalNik).trim();
+      if (payload?.nik) payload.nik = String(payload.nik).trim();
+      return runManagementAction('manageStaff', payload);
+    },
     addLog,
     deleteLog,
     syncOfflineQueue,
@@ -313,6 +267,12 @@ export const installRuntimeHardening = (store: StoreApi) => {
     sendWhatsAppNotification: async () => undefined,
     sendWhatsAppProgressUpdate: async () => undefined,
   });
+
+  // Remove any stale local operational state immediately after runtime install.
+  const current = store.getState();
+  if (Array.isArray(current.staff) && current.staff.some((s: any) => !normalizeNikForMatch(s?.nik))) {
+    store.setState({ staff: [] });
+  }
 };
 
 export const fetchServerDataOnce = async (store: StoreApi) => {

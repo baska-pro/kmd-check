@@ -54,3 +54,91 @@
     flex: 0 0 auto;
   }
 }
+
+/* === KMD Check 2026 UI system === */
+:root {
+  --kmd-radius: 18px;
+  --kmd-shadow: 0 10px 30px rgba(15, 23, 42, .055);
+  --kmd-shadow-hover: 0 16px 44px rgba(79, 70, 229, .10);
+}
+
+/* Consistent surfaces inside the dashboard without changing component behavior. */
+main .rounded-2xl,
+main .rounded-3xl {
+  box-shadow: var(--kmd-shadow);
+}
+
+main button,
+main input,
+main select,
+main textarea {
+  transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease, background-color .16s ease;
+}
+
+main button:not(:disabled):active {
+  transform: scale(.985);
+}
+
+main input:focus,
+main select:focus,
+main textarea:focus {
+  outline: none;
+  border-color: rgb(99 102 241 / .65) !important;
+  box-shadow: 0 0 0 3px rgb(99 102 241 / .12) !important;
+}
+
+main table {
+  border-spacing: 0;
+}
+
+main thead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+main tbody tr {
+  transition: background-color .14s ease;
+}
+
+/* Cleaner modal scrolling on mobile. */
+.fixed form.max-h-\[75vh\] {
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+}
+
+/* Make edit forms easier to scan on small screens. */
+@media (max-width: 639px) {
+  main {
+    padding-bottom: calc(5.5rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  .fixed.inset-0 > div.rounded-3xl {
+    max-height: calc(100dvh - 1.5rem);
+  }
+
+  .fixed form.max-h-\[75vh\] {
+    max-height: calc(100dvh - 8rem) !important;
+    padding: 1rem !important;
+  }
+
+  main .grid.grid-cols-5 {
+    gap: .3rem !important;
+  }
+
+  main .grid.grid-cols-5 input {
+    min-width: 0;
+    padding-left: .25rem !important;
+    padding-right: .25rem !important;
+  }
+}
+
+/* Accessible reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}
