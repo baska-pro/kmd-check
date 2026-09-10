@@ -234,7 +234,11 @@ export const installRuntimeHardening = (store: StoreApi) => {
     }
   };
 
-  const deleteLog = async (id: string) => runManagementAction('deleteLog', id);
+  const deleteLog = async (id: string) => {
+    if (!navigator.onLine) throw new Error('Hapus log membutuhkan koneksi ke Spreadsheet.');
+    const data = await postGas({ action: 'deleteLog', id });
+    if (data && typeof data === 'object') applyServerData(store, data);
+  };
 
   // Offline queue is intentionally disabled. The app must never pretend local data is authoritative.
   const syncOfflineQueue = async () => {
