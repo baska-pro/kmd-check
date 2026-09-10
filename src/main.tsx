@@ -5,7 +5,7 @@ import './index.css';
 import { registerSW } from 'virtual:pwa-register';
 import { toast } from 'sonner';
 import { useStore } from './lib/store';
-import { bootstrapDataSynchronization } from './lib/bootstrapSync';
+import { bootstrapDataSynchronization, sanitizePersistedServerState } from './lib/bootstrapSync';
 
 const updateSW = registerSW({
   onNeedRefresh() {
@@ -22,18 +22,25 @@ const updateSW = registerSW({
   },
 });
 
-const root = createRoot(document.getElementById('root')!);
+// Prevent yesterday's persisted server state from being re-used as live data,
+// but never block the initial React render on a network call.
+sanitizePersistedServerState();
 
-const renderApp = () => {
-  root.render(
-    <StrictMode>
-      <App />
-    </StrictMode>,
-  );
-};
+const rootElement = document.getElementById('root');
+if (!rootElement) {
+  throw new Error('Root element #root tidak ditemukan.');
+}
 
-bootstrapDataSynchronization(useStore)
-  .catch((error) => {
+createRoot(rootElement).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+);
+
+// Synchronize with GAS/Spreadsheet after the UI is already visible.
+// This avoids a blank screen when GAS is slow, temporarily unreachable, or redirecting.
+window.setTimeout(() => {
+  bootstrapDataSynchronization(useStore).catch((error) => {
     console.error('[Sync] Bootstrap synchronization failed:', error);
-  })
-  .finally(renderApp);
+  });
+}, 0);
