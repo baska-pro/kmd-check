@@ -1,0 +1,56 @@
+/* KMD responsive UI hardening
+ * Keep staff names readable on phones and narrow cards. The previous dashboard
+ * used Tailwind `truncate` / fixed max-width utilities that hid long names.
+ */
+
+/* Simple staff list: allow the name to wrap instead of ellipsis. */
+.divide-y > div > div.min-w-0 > span.truncate {
+  min-width: 0;
+  white-space: normal !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  overflow-wrap: anywhere;
+  line-height: 1.25rem;
+}
+
+/* Compact/grid staff cards from the legacy card variant. */
+.truncate.max-w-\[120px\],
+.truncate.sm\:max-w-\[140px\] {
+  max-width: none !important;
+  white-space: normal !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  overflow-wrap: anywhere;
+}
+
+/* Prevent name/action rows from forcing the name behind action buttons. */
+@media (max-width: 639px) {
+  .grid > div > .flex.items-start.justify-between.gap-2\.5 {
+    align-items: flex-start;
+  }
+
+  .grid > div > .flex.items-start.justify-between.gap-2\.5 > .flex.items-start.gap-3.min-w-0 {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .grid > div > .flex.items-start.justify-between.gap-2\.5 > .flex.items-start.gap-3.min-w-0 > .min-w-0 {
+    min-width: 0;
+    width: 100%;
+  }
+
+  /* Simple list right-side badges may wrap below rather than cover the name. */
+  .divide-y > div.flex.items-center.justify-between {
+    align-items: flex-start;
+    gap: .5rem;
+  }
+
+  .divide-y > div.flex.items-center.justify-between > div:first-child {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .divide-y > div.flex.items-center.justify-between > div:last-child {
+    flex: 0 0 auto;
+  }
+}
