@@ -1,94 +1,33 @@
-const SCRIPT_VERSION = "1.3";
+const SCRIPT_VERSION = "2.2";
+const KMD_DATABASE_ID = "1QWUYC-xo8btMWbJtl0FUoUKR04xe1_1M2RZzucAO8ds";
 var KMD_WRITE_LOCK_HELD = false; // Hindari deadlock saat broker notifikasi dipanggil dari write API.
 
 function getDB() {
-  var props = PropertiesService.getScriptProperties();
-  var id = props.getProperty('DB_ID');
-  if (id) {
-    try {
-      return SpreadsheetApp.openById(id);
-    } catch(e) {}
+  // KMD Check Database adalah satu-satunya source of truth.
+  // Jangan bergantung pada PropertiesService atau active spreadsheet.
+  try {
+    return SpreadsheetApp.openById(KMD_DATABASE_ID);
+  } catch (e) {
+    throw new Error('KMD Check Database tidak dapat dibuka: ' + (e.message || e));
   }
-  
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  if (ss) {
-    props.setProperty('DB_ID', ss.getId());
-    return ss;
-  }
-  
-  ss = SpreadsheetApp.create("KMD Monitoring Database");
-  props.setProperty('DB_ID', ss.getId());
-  return ss;
 }
 
 function setup() {
   var ss = getDB();
-  
-  var sheets = ["Users", "Staff", "ActivityLog", "Transactions", "SystemStatus"];
-  sheets.forEach(function(name) {
-    if (!ss.getSheetByName(name)) {
-      ss.insertSheet(name);
-    }
+  var requiredSheets = ['Users', 'Staff', 'Options', 'SystemStatus', 'CompanyProfile', 'ActivityLog', 'Transactions'];
+  requiredSheets.forEach(function(name) {
+    if (!ss.getSheetByName(name)) throw new Error('Sheet wajib tidak ditemukan: ' + name);
   });
-  
-  // Setup Users
-  var usersSheet = ss.getSheetByName("Users");
-  if (usersSheet.getLastRow() === 0) {
-    usersSheet.appendRow(["Username", "Password", "Role"]);
-    usersSheet.appendRow(["admin", "admin123", "ADMIN"]);
-    usersSheet.appendRow(["viewer", "viewer123", "USER"]);
-  }
-  
-  // Setup Staff
-  var staffSheet = ss.getSheetByName("Staff");
-  if (staffSheet.getLastRow() === 0) {
-    staffSheet.appendRow(["NIK", "Nama", "Jabatan", "StatusKerja", "JamBerangkat", "JamPulang", "ProgressCenter", "JumlahCenter", "StatusUpload", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", "TanggalUpdate"]);
-    var today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
 
-    var initialStaff = [
-      ["001196/2013", "Dadi Supriyadi", "BRANCH MANAGER", "Di Kantor", "", "", 0, 0, "Tidak ada Center", 0, 0, 0, 0, 0, today],
-      ["001557/2014", "Arsad Awaludin", "ASSISTANT BRANCH MANAGER", "Di Kantor", "", "", 0, 0, "Tidak ada Center", 0, 0, 0, 0, 0, today],
-      ["001839/2015", "Cep Dullatip", "MIS SUPPORT ADMINISTRATION STAFF", "Di Kantor", "", "", 0, 0, "Tidak ada Center", 0, 0, 0, 0, 0, today],
-      ["006255/2018", "Rian Saepul Rahman", "FIELD OFFICER", "Di Kantor", "", "", 0, 6, "Sudah upload semua", 4, 6, 5, 7, 2, today],
-      ["006983/2019", "Karmin Rahmadi", "FIELD OFFICER", "Di Kantor", "", "", 0, 4, "Sudah upload semua", 4, 4, 6, 7, 2, today],
-      ["009364/2022", "Zacky Januar Moch Syarif", "FIELD OFFICER", "Di Kantor", "", "", 0, 3, "Sudah upload semua", 8, 3, 5, 4, 2, today],
-      ["0357/05/26", "Moch. Argiansyah", "FIELD OFFICER", "Di Kantor", "", "", 0, 5, "Sudah upload semua", 6, 5, 6, 7, 2, today],
-      ["010348/2023", "Jaka Supriatna", "FIELD OFFICER", "Di Kantor", "", "", 0, 5, "Sudah upload semua", 8, 5, 7, 9, 0, today],
-      ["010755/2023", "Fajar Faturohman", "FINANCE SYSTEM ADMINISTRATION STAFF", "Di Kantor", "", "", 0, 0, "Tidak ada Center", 0, 0, 0, 0, 0, today],
-      ["011199/2023", "Fajar Fauzan", "FIELD OFFICER", "Di Kantor", "", "", 0, 6, "Sudah upload semua", 5, 6, 6, 5, 1, today],
-      ["011143/2023", "Sansan Nugraha", "FIELD OFFICER", "Di Kantor", "", "", 0, 8, "Sudah upload semua", 5, 8, 13, 5, 1, today],
-      ["0703/06/26", "Muhamad Rizki Setiawan", "FIELD OFFICER", "Di Kantor", "", "", 0, 9, "Sudah upload semua", 6, 9, 10, 6, 6, today],
-      ["012535/2024", "Muhammad Ilham", "FIELD OFFICER", "Di Kantor", "", "", 0, 9, "Sudah upload semua", 9, 9, 7, 11, 2, today],
-      ["0363/05/26", "Yoga Rahmat Mauldi", "FIELD OFFICER", "Di Kantor", "", "", 0, 7, "Sudah upload semua", 3, 7, 7, 6, 3, today],
-      ["0841/07/26", "Saeful Anwar", "FIELD OFFICER", "Di Kantor", "", "", 0, 3, "Sudah upload semua", 2, 3, 0, 0, 0, today]
-    ];
-    initialStaff.forEach(function(row) { staffSheet.appendRow(row); });
-  } else {
-    // Ensure and auto-heal existing headers
-    _ensureAndFixStaffHeaders(staffSheet);
+  var staffSheet = ss.getSheetByName('Staff');
+  _ensureAndFixStaffHeaders(staffSheet);
+  var headers = staffSheet.getRange(1, 1, 1, staffSheet.getLastColumn()).getDisplayValues()[0];
+  var lowerHeaders = headers.map(function(h) { return String(h || '').toLowerCase().replace(/\s+/g, ''); });
+  var nikColumn = _resolveColumnIndexForField(lowerHeaders, 'nik');
+  if (nikColumn !== -1 && staffSheet.getMaxRows() > 1) {
+    staffSheet.getRange(2, nikColumn + 1, staffSheet.getMaxRows() - 1, 1).setNumberFormat('@');
   }
-  
-  // Setup SystemStatus
-  var sysSheet = ss.getSheetByName("SystemStatus");
-  if (sysSheet.getLastRow() === 0) {
-    sysSheet.appendRow(["Key", "Value"]);
-    sysSheet.appendRow(["statusKantor", "Operasional normal"]);
-    sysSheet.appendRow(["statusSistem", "Normal"]);
-    sysSheet.appendRow(["statusMSA", "💻 Bekerja"]);
-    sysSheet.appendRow(["statusFSA", "Menerima Transaksi"]);
-    sysSheet.appendRow(["statusBalancing", "Proses"]);
-  }
-  
-  // Panggil fungsi pembuat trigger otomatis jika tersedia
-  try {
-    if (typeof setupRequiredTriggers === 'function') {
-      setupRequiredTriggers();
-    }
-  } catch (trigErr) {
-    Logger.log("Gagal membuat trigger otomatis pada setup: " + trigErr.toString());
-  }
-  
-  return "Setup complete. Database ready. Spreadsheet URL: " + ss.getUrl();
+  return 'KMD Check Database siap: ' + ss.getName() + ' (' + ss.getId() + ')';
 }
 
 function doPost(e) {
@@ -157,6 +96,8 @@ function doPost(e) {
         result = manageStaff(data.payload);
       } else if (action === "setup") {
         result = { message: setup() };
+      } else {
+        throw new Error('Action API tidak dikenal: ' + action);
       }
       
       output.setContent(JSON.stringify({ success: true, data: result }));
@@ -182,20 +123,24 @@ function doGet(e) {
 }
 
 function login(username, password) {
-  var sheet = getDB().getSheetByName("Users");
-  var data = sheet.getDataRange().getValues();
-  var inputUser = String(username || "").trim().toLowerCase();
-  var inputPass = String(password || "").trim();
-  
+  var sheet = getDB().getSheetByName('Users');
+  if (!sheet) throw new Error('Sheet Users tidak ditemukan.');
+  var data = sheet.getDataRange().getDisplayValues();
+  var inputUser = String(username || '').trim().toLowerCase();
+  var inputPass = String(password || '').trim();
+  if (!inputUser || !inputPass) throw new Error('Username dan password wajib diisi.');
+
   for (var i = 1; i < data.length; i++) {
-    var checkUsername = String(data[i][0] || "").trim().toLowerCase();
-    var checkPassword = String(data[i][1] || "").trim();
-    
-    if (checkUsername === inputUser && checkPassword === inputPass) {
-      return { username: data[i][0], role: data[i][2] };
+    var sheetUser = String(data[i][0] || '').trim();
+    var sheetPass = String(data[i][1] || '').trim();
+    if (sheetUser.toLowerCase() === inputUser && sheetPass === inputPass) {
+      return {
+        username: sheetUser,
+        role: String(data[i][2] || 'USER').trim().toUpperCase()
+      };
     }
   }
-  throw new Error("Username atau password salah");
+  throw new Error('Username atau password salah');
 }
 
 function _ensureAndFixStaffHeaders(staffSheet) {
@@ -362,417 +307,238 @@ function _findStaffRowIndex(sheetData, lowerHeaders, targetNik) {
 
 function getData() {
   var ss = getDB();
-  
-  // Auto-setup if key sheets are missing
-  if (!ss.getSheetByName("Staff") || !ss.getSheetByName("SystemStatus") || !ss.getSheetByName("Users")) {
-    setup();
-  }
-  
-  // Get Staff
-  var staffSheet = ss.getSheetByName("Staff");
-  _ensureAndFixStaffHeaders(staffSheet);
-  
-  var staffData = staffSheet.getDataRange().getValues();
+  var requiredSheets = ['Users', 'Staff', 'Options', 'SystemStatus', 'CompanyProfile', 'ActivityLog'];
+  requiredSheets.forEach(function(name) {
+    if (!ss.getSheetByName(name)) throw new Error('Sheet wajib tidak ditemukan: ' + name);
+  });
+
+  var staffSheet = ss.getSheetByName('Staff');
+  var staffRange = staffSheet.getDataRange();
+  var staffData = staffRange.getValues();
+  var staffDisplay = staffRange.getDisplayValues();
   var staff = [];
-  
+
   if (staffData.length > 1) {
-    var headers = staffData[0];
-    var today = new Date();
-    // Get components in Asia/Jakarta timezone to align with client and local branch operations
-    var jakartaStr = Utilities.formatDate(today, "Asia/Jakarta", "yyyy-MM-dd-HH-mm-ss");
-    var jParts = jakartaStr.split('-');
-    var targetDate = new Date(parseInt(jParts[0]), parseInt(jParts[1]) - 1, parseInt(jParts[2]), parseInt(jParts[3]), parseInt(jParts[4]), parseInt(jParts[5]));
-    
-    // Get day index (0=Minggu, 1=Senin, 2=Selasa, 3=Rabu, 4=Kamis, 5=Jumat, 6=Sabtu)
-    var dayIndex = targetDate.getDay();
-    var dayKeys = ['minggu', 'senin', 'selasa', 'rabu', 'kamis', 'jumat', 'sabtu'];
-    var currentDayKey = dayKeys[dayIndex];
-    
-    // Normalize headers to be completely case and space insensitive
-    var lowerHeaders = headers.map(function(h) {
-      return String(h || "").toLowerCase().replace(/\s+/g, '');
-    });
-    
+    var headers = staffDisplay[0];
+    var lowerHeaders = headers.map(function(h) { return String(h || '').toLowerCase().replace(/\s+/g, ''); });
     var indices = _resolveStaffFieldIndices(lowerHeaders);
-    var idxDay = _resolveColumnIndexForField(lowerHeaders, currentDayKey);
-    if (idxDay === -1 && indices[currentDayKey] !== undefined) {
-      idxDay = indices[currentDayKey];
-    }
-    
+
+    var jakartaText = Utilities.formatDate(new Date(), 'Asia/Jakarta', 'yyyy-MM-dd-HH-mm-ss');
+    var jp = jakartaText.split('-');
+    var jakartaDate = new Date(Number(jp[0]), Number(jp[1]) - 1, Number(jp[2]), 12, 0, 0);
+    var dayIndex = jakartaDate.getDay();
+    var dayKeys = ['minggu', 'senin', 'selasa', 'rabu', 'kamis', 'jumat', 'sabtu'];
+    var dayKey = dayKeys[dayIndex];
+    var dayColumn = _resolveColumnIndexForField(lowerHeaders, dayKey);
+
     for (var i = 1; i < staffData.length; i++) {
       var row = staffData[i];
-      
-      // Skip empty rows
-      if (!row || row.length === 0 || String(row[0] || "").trim() === "") continue;
-      
-      var nik = indices.nik !== -1 ? String(row[indices.nik] || "").trim() : String(row[0] || "").trim();
+      var displayRow = staffDisplay[i] || [];
+      var nikIndex = indices.nik !== -1 ? indices.nik : 0;
+      var nik = String(displayRow[nikIndex] || '').trim();
       if (!nik) continue;
-      
-      var nama = indices.nama !== -1 ? String(row[indices.nama] || "").trim() : "";
-      var jabatan = indices.jabatan !== -1 ? String(row[indices.jabatan] || "FIELD OFFICER").trim() : "FIELD OFFICER";
-      var statusKerja = indices.statusKerja !== -1 ? String(row[indices.statusKerja] || "Di Kantor").trim() : "Di Kantor";
-      
-      var jamBerangkat = indices.jamBerangkat !== -1 ? row[indices.jamBerangkat] : "";
-      if (jamBerangkat instanceof Date) jamBerangkat = Utilities.formatDate(jamBerangkat, Session.getScriptTimeZone(), "HH:mm");
-      else jamBerangkat = String(jamBerangkat || "").trim();
 
-      var jamPulang = indices.jamPulang !== -1 ? row[indices.jamPulang] : "";
-      if (jamPulang instanceof Date) jamPulang = Utilities.formatDate(jamPulang, Session.getScriptTimeZone(), "HH:mm");
-      else jamPulang = String(jamPulang || "").trim();
+      var progress = indices.progressCenter !== -1 ? Number(row[indices.progressCenter] || 0) : 0;
+      if (!isFinite(progress)) progress = 0;
 
-      var progressCenter = indices.progressCenter !== -1 ? Number(row[indices.progressCenter] || 0) : 0;
-      if (isNaN(progressCenter)) progressCenter = 0;
-
-      // Day target: Senin, Selasa, Rabu, Kamis, Jumat (Authoritative schedule for today)
-      var dayTarget = null;
-      if (dayIndex >= 1 && dayIndex <= 5 && idxDay !== -1) {
-        var cellVal = row[idxDay];
-        if (cellVal !== "" && cellVal !== null && !isNaN(Number(cellVal))) {
-          dayTarget = Number(cellVal);
-        }
+      var targetToday = null;
+      if (dayIndex >= 1 && dayIndex <= 5 && dayColumn !== -1) {
+        var rawTarget = row[dayColumn];
+        if (rawTarget !== '' && rawTarget !== null && isFinite(Number(rawTarget))) targetToday = Number(rawTarget);
       }
-        
-      var fallbackTarget = (indices.jumlahCenter !== -1 && row[indices.jumlahCenter] !== "" && row[indices.jumlahCenter] !== null && !isNaN(Number(row[indices.jumlahCenter])))
-        ? Number(row[indices.jumlahCenter])
-        : 0;
+      var fallbackTarget = 0;
+      if (indices.jumlahCenter !== -1 && row[indices.jumlahCenter] !== '' && row[indices.jumlahCenter] !== null && isFinite(Number(row[indices.jumlahCenter]))) {
+        fallbackTarget = Number(row[indices.jumlahCenter]);
+      }
+      var target = targetToday !== null ? targetToday : fallbackTarget;
 
-      var jumlahCenter = dayTarget !== null ? dayTarget : fallbackTarget;
+      var upload = 'Belum upload';
+      if (target <= 0) upload = 'Tidak ada Center';
+      else if (progress >= target) upload = 'Sudah upload semua';
+      else if (progress > 0) upload = 'Sebagian upload';
 
-      // Status Upload: derive or sanitize
-      var rawUpload = indices.statusUpload !== -1 ? String(row[indices.statusUpload] || "").trim() : "";
-      if (jumlahCenter === 0) {
-        rawUpload = "Tidak ada Center";
-      } else if (!rawUpload || (!isNaN(Number(rawUpload)) && rawUpload !== "")) {
-        if (progressCenter >= jumlahCenter) rawUpload = "Sudah upload semua";
-        else if (progressCenter > 0) rawUpload = "Sebagian upload";
-        else rawUpload = "Belum upload";
+      function displayAt(index) {
+        return index !== -1 ? String(displayRow[index] || '').trim() : '';
+      }
+      function numberAt(index) {
+        if (index === -1) return 0;
+        var n = Number(row[index]);
+        return isFinite(n) ? n : 0;
       }
 
-      var tanggalUpdate = indices.tanggalUpdate !== -1 ? row[indices.tanggalUpdate] : "";
-      if (tanggalUpdate instanceof Date) tanggalUpdate = Utilities.formatDate(tanggalUpdate, Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
-      else tanggalUpdate = String(tanggalUpdate || "").trim();
-
-      var obj = {
+      staff.push({
         nik: nik,
-        nama: nama,
-        jabatan: jabatan,
-        statusKerja: statusKerja,
-        jamBerangkat: jamBerangkat,
-        jamPulang: jamPulang,
-        progressCenter: progressCenter,
-        jumlahCenter: jumlahCenter,
-        statusUpload: rawUpload,
-        senin: indices.senin !== -1 ? Number(row[indices.senin] || 0) : 0,
-        selasa: indices.selasa !== -1 ? Number(row[indices.selasa] || 0) : 0,
-        rabu: indices.rabu !== -1 ? Number(row[indices.rabu] || 0) : 0,
-        kamis: indices.kamis !== -1 ? Number(row[indices.kamis] || 0) : 0,
-        jumat: indices.jumat !== -1 ? Number(row[indices.jumat] || 0) : 0,
-        tanggalUpdate: tanggalUpdate
-      };
-      staff.push(obj);
+        nama: displayAt(indices.nama),
+        jabatan: displayAt(indices.jabatan) || 'FIELD OFFICER',
+        statusKerja: displayAt(indices.statusKerja) || 'Di Kantor',
+        jamBerangkat: displayAt(indices.jamBerangkat),
+        jamPulang: displayAt(indices.jamPulang),
+        progressCenter: progress,
+        jumlahCenter: target,
+        statusUpload: upload,
+        keterangan: displayAt(indices.keterangan),
+        senin: numberAt(indices.senin),
+        selasa: numberAt(indices.selasa),
+        rabu: numberAt(indices.rabu),
+        kamis: numberAt(indices.kamis),
+        jumat: numberAt(indices.jumat),
+        tanggalUpdate: displayAt(indices.tanggalUpdate)
+      });
     }
   }
-  
-  // Get System Status
-  var sysSheet = ss.getSheetByName("SystemStatus");
-  var sysData = sysSheet.getDataRange().getValues();
+
   var systemStatus = {};
-  for (var i = 1; i < sysData.length; i++) {
-    var rawKey = String(sysData[i][0] || "");
-    var normKey = rawKey.trim();
-    if (normKey) {
-      systemStatus[normKey] = sysData[i][1];
-    }
+  var sysData = ss.getSheetByName('SystemStatus').getDataRange().getValues();
+  for (var s = 1; s < sysData.length; s++) {
+    var key = String(sysData[s][0] || '').trim();
+    if (key) systemStatus[key] = sysData[s][1];
   }
 
-  // Ensure default reset configurations and status keys exist in SystemStatus sheet
-  var defaultsToEnsure = {
-    "resetDefaultStatusKerja": "Di Kantor",
-    "resetDefaultStatusUpload": "Belum upload",
-    "resetDefaultStatusKantor": "Buka",
-    "resetDefaultStatusSistem": "Normal",
-    "resetDefaultStatusMSA": "💻 Bekerja",
-    "resetDefaultStatusFSA": "Menerima Transaksi",
-    "resetDefaultStatusBalancing": "Proses",
-    "resetDefaultStatusManager": "💻 Bekerja",
-    "resetDefaultStatusAsistenManager": "💻 Bekerja",
-    "statusManager": "💻 Bekerja",
-    "statusAsistenManager": "💻 Bekerja"
-  };
-
-  var addedAny = false;
-  for (var key in defaultsToEnsure) {
-    if (typeof systemStatus[key] === 'undefined' || systemStatus[key] === null || String(systemStatus[key]).trim() === "") {
-      sysSheet.appendRow([key, defaultsToEnsure[key]]);
-      systemStatus[key] = defaultsToEnsure[key];
-      addedAny = true;
-    }
-  }
-  if (addedAny) {
-    // Refresh sysData
-    sysData = sysSheet.getDataRange().getValues();
-  }
-  
-  // Get Options
-  var optionsSheet = ss.getSheetByName("Options");
-  if (!optionsSheet) {
-    optionsSheet = ss.insertSheet("Options");
-    optionsSheet.appendRow(["Kategori", "Opsi"]);
-    var defaultOptions = [
-      ["statusKantor", "Operasional normal"],
-      ["statusKantor", "Tutup"],
-      ["statusSistem", "Normal"],
-      ["statusSistem", "Gangguan"],
-      ["statusMSA", "💻 Bekerja"],
-      ["statusMSA", "🕌 Shalat"],
-      ["statusMSA", "🍽️ Makan"],
-      ["statusMSA", "🚶 Keluar kantor"],
-      ["statusMSA", "💬 Diskusi"],
-      ["statusMSA", "👥 Kumpul"],
-      ["statusFSA", "Menerima Transaksi"],
-      ["statusFSA", "Istirahat"],
-      ["statusBalancing", "Proses"],
-      ["statusBalancing", "Balance"],
-      ["statusBalancing", "Selisih"],
-      ["statusBalancing", "Error"],
-      ["statusBalancing", "Selesai"]
-    ];
-    defaultOptions.forEach(function(opt) { optionsSheet.appendRow(opt); });
-  }
-  
-  var optionsData = optionsSheet.getDataRange().getValues();
   var options = {};
-  if (optionsData.length > 1) {
-    for (var i = 1; i < optionsData.length; i++) {
-      var cat = String(optionsData[i][0] || "").trim();
-      var val = String(optionsData[i][1] || "").trim();
-      if (cat && val) {
-        if (!options[cat]) options[cat] = [];
-        if (options[cat].indexOf(val) === -1) {
-          options[cat].push(val);
-        }
-      }
-    }
+  var optionsData = ss.getSheetByName('Options').getDataRange().getDisplayValues();
+  for (var o = 1; o < optionsData.length; o++) {
+    var category = String(optionsData[o][0] || '').trim();
+    var value = String(optionsData[o][1] || '').trim();
+    if (!category || !value) continue;
+    if (!options[category]) options[category] = [];
+    if (options[category].indexOf(value) === -1) options[category].push(value);
   }
 
-  // Ensure statusManager and statusAsistenManager options exist in Options sheet
-  var hasStatusManagerOpts = !!(options["statusManager"] && options["statusManager"].length > 0);
-  var hasStatusAsistenManagerOpts = !!(options["statusAsistenManager"] && options["statusAsistenManager"].length > 0);
-  
-  if (!hasStatusManagerOpts || !hasStatusAsistenManagerOpts) {
-    var defaultManagerOpts = [
-      ["statusManager", "💻 Bekerja"],
-      ["statusManager", "🕌 Shalat"],
-      ["statusManager", "🍽️ Makan"],
-      ["statusManager", "🚶 Keluar kantor"],
-      ["statusManager", "💬 Diskusi"],
-      ["statusManager", "👥 Kumpul"]
-    ];
-    var defaultAsistenManagerOpts = [
-      ["statusAsistenManager", "💻 Bekerja"],
-      ["statusAsistenManager", "🕌 Shalat"],
-      ["statusAsistenManager", "🍽️ Makan"],
-      ["statusAsistenManager", "🚶 Keluar kantor"],
-      ["statusAsistenManager", "💬 Diskusi"],
-      ["statusAsistenManager", "👥 Kumpul"]
-    ];
-    
-    if (!hasStatusManagerOpts) {
-      defaultManagerOpts.forEach(function(opt) { optionsSheet.appendRow(opt); });
-    }
-    if (!hasStatusAsistenManagerOpts) {
-      defaultAsistenManagerOpts.forEach(function(opt) { optionsSheet.appendRow(opt); });
-    }
-    
-    // Refresh options object
-    optionsData = optionsSheet.getDataRange().getValues();
-    options = {};
-    for (var i = 1; i < optionsData.length; i++) {
-      var cat = String(optionsData[i][0] || "").trim();
-      var val = String(optionsData[i][1] || "").trim();
-      if (cat && val) {
-        if (!options[cat]) options[cat] = [];
-        if (options[cat].indexOf(val) === -1) {
-          options[cat].push(val);
-        }
-      }
-    }
-  }
-
-  // Get Company Profile
-  var cpSheet = ss.getSheetByName("CompanyProfile");
-  if (!cpSheet) {
-    cpSheet = ss.insertSheet("CompanyProfile");
-    cpSheet.appendRow(["ID", "Kategori", "Informasi", "Icon"]);
-    cpSheet.appendRow([Utilities.getUuid(), "Nama Perusahaan", "PT. KMD Mandiri", "🏢"]);
-    cpSheet.appendRow([Utilities.getUuid(), "Alamat", "Jl. Sudirman No. 123, Jakarta", "📍"]);
-    cpSheet.appendRow([Utilities.getUuid(), "Kontak", "0812-3456-7890", "📞"]);
-    cpSheet.appendRow([Utilities.getUuid(), "Email", "info@kmdmandiri.com", "✉️"]);
-  }
-  var cpData = cpSheet.getDataRange().getValues();
   var companyProfile = [];
-  if (cpData.length > 1) {
-    for (var i = 1; i < cpData.length; i++) {
-      companyProfile.push({ id: cpData[i][0], kategori: cpData[i][1], informasi: cpData[i][2], icon: cpData[i][3] });
-    }
+  var companyData = ss.getSheetByName('CompanyProfile').getDataRange().getDisplayValues();
+  for (var c = 1; c < companyData.length; c++) {
+    if (!String(companyData[c][0] || '').trim() && !String(companyData[c][1] || '').trim()) continue;
+    companyProfile.push({
+      id: String(companyData[c][0] || '').trim(),
+      kategori: String(companyData[c][1] || '').trim(),
+      informasi: String(companyData[c][2] || '').trim(),
+      icon: String(companyData[c][3] || '').trim()
+    });
   }
 
-  // Get Users List (for admin management)
-  var usersSheet = ss.getSheetByName("Users");
-  var usersData = usersSheet.getDataRange().getValues();
+  // Password tidak pernah dikirim ke browser. Login selalu membaca langsung sheet Users.
   var usersList = [];
-  if (usersData.length > 1) {
-    for (var i = 1; i < usersData.length; i++) {
-      usersList.push({ username: usersData[i][0], role: usersData[i][2] });
-    }
+  var usersData = ss.getSheetByName('Users').getDataRange().getDisplayValues();
+  for (var u = 1; u < usersData.length; u++) {
+    var uname = String(usersData[u][0] || '').trim();
+    if (!uname) continue;
+    usersList.push({ username: uname, role: String(usersData[u][2] || 'USER').trim().toUpperCase() });
   }
-  
-  return { staff: staff, systemStatus: systemStatus, options: options, companyProfile: companyProfile, usersList: usersList, activityLogs: getFilteredLogs() };
+
+  return {
+    staff: staff,
+    systemStatus: systemStatus,
+    options: options,
+    companyProfile: companyProfile,
+    usersList: usersList,
+    activityLogs: getFilteredLogs(),
+    serverMeta: {
+      databaseId: KMD_DATABASE_ID,
+      databaseName: ss.getName(),
+      dateWIB: Utilities.formatDate(new Date(), 'Asia/Jakarta', 'yyyy-MM-dd'),
+      timestampWIB: Utilities.formatDate(new Date(), 'Asia/Jakarta', 'yyyy-MM-dd HH:mm:ss')
+    }
+  };
 }
 
 function updateStaff(nik, updates) {
-  var sheet = getDB().getSheetByName("Staff");
-  var data = sheet.getDataRange().getValues();
-  var headers = data[0];
-  
-  var lowerHeaders = headers.map(function(h) {
-    return String(h || "").toLowerCase().replace(/\s+/g, '');
-  });
-  
-  var rowIndex = _findStaffRowIndex(data, lowerHeaders, nik);
-  if (rowIndex !== -1) {
-    var changedFields = {};
-    var isAnyTriggerKey = false;
-    
-    for (var key in updates) {
-      var colIndex = _resolveColumnIndexForField(lowerHeaders, key);
-      if (colIndex !== -1) {
-        var cellRange = sheet.getRange(rowIndex + 1, colIndex + 1);
-        var oldVal = cellRange.getValue();
-        var newVal = updates[key];
-        if (newVal === undefined || newVal === null) newVal = "";
-        
-        if (String(newVal).trim() !== String(oldVal).trim()) {
-          cellRange.setValue(newVal);
-          
-          var cleanKey = String(key).toLowerCase().replace(/[^a-z0-9]/g, '');
-          var isTriggerKey = ['progresscenter', 'statuskerja', 'jamberangkat', 'jampulang', 'statusupload', 'progress', 'status', 'upload'].indexOf(cleanKey) !== -1;
-          if (isTriggerKey) {
-            changedFields[cleanKey] = { oldVal: oldVal, newVal: newVal };
-            isAnyTriggerKey = true;
-          }
-        }
-      }
-    }
-    
-    // Auto update TanggalUpdate column to current Date timestamp
-    if (isAnyTriggerKey) {
-      var idxTglUpdate = _resolveColumnIndexForField(lowerHeaders, "tanggalupdate");
-      if (idxTglUpdate !== -1) {
-        sheet.getRange(rowIndex + 1, idxTglUpdate + 1).setValue(new Date());
-      }
-    }
+  var sheet = getDB().getSheetByName('Staff');
+  if (!sheet) throw new Error('Sheet Staff tidak ditemukan.');
+  var range = sheet.getDataRange();
+  var values = range.getValues();
+  var displayValues = range.getDisplayValues();
+  if (values.length < 2) throw new Error('Data Staff kosong.');
+  var headers = displayValues[0];
+  var lowerHeaders = headers.map(function(h) { return String(h || '').toLowerCase().replace(/\s+/g, ''); });
+  var rowIndex = _findStaffRowIndex(displayValues, lowerHeaders, nik);
+  if (rowIndex === -1) throw new Error('Staf NIK: ' + nik + ' tidak ditemukan di KMD Check Database.');
 
-    logActivity("Update Staff", String(nik) + " updated");
-
-    // Trigger the unified notification broker once with all collected changes (debounced)
-    if (isAnyTriggerKey && typeof processStaffNotification === 'function') {
-      try {
-        var updatedVals = sheet.getRange(rowIndex + 1, 1, 1, headers.length).getValues()[0];
-        var namaCol = _resolveColumnIndexForField(lowerHeaders, "nama");
-        var jabatanCol = _resolveColumnIndexForField(lowerHeaders, "jabatan");
-        var nama = namaCol !== -1 ? String(updatedVals[namaCol] || "").trim() : "";
-        var jabatan = jabatanCol !== -1 ? String(updatedVals[jabatanCol] || "").trim() : "";
-        
-        processStaffNotification(nama, jabatan, changedFields, updatedVals, lowerHeaders);
-      } catch (waErr) {
-        Logger.log("Failed to process staff notification: " + waErr.toString());
-      }
+  var changedFields = {};
+  var hasOperationalChange = false;
+  for (var key in (updates || {})) {
+    if (!Object.prototype.hasOwnProperty.call(updates, key)) continue;
+    var colIndex = _resolveColumnIndexForField(lowerHeaders, key);
+    if (colIndex === -1) continue;
+    var cell = sheet.getRange(rowIndex + 1, colIndex + 1);
+    var oldVal = cell.getDisplayValue();
+    var newVal = updates[key];
+    if (newVal === undefined || newVal === null) newVal = '';
+    var cleanKey = String(key).toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (cleanKey === 'nik') {
+      cell.setNumberFormat('@');
+      newVal = String(newVal).trim();
     }
-
-    return getData();
+    if (String(oldVal).trim() === String(newVal).trim()) continue;
+    cell.setValue(newVal);
+    if (['progresscenter', 'statuskerja', 'jamberangkat', 'jampulang', 'statusupload', 'progress', 'status', 'upload'].indexOf(cleanKey) !== -1) {
+      changedFields[cleanKey] = { oldVal: oldVal, newVal: newVal };
+      hasOperationalChange = true;
+    }
   }
-  throw new Error("Staf NIK: " + nik + " tidak ditemukan di sistem database.");
+
+  if (hasOperationalChange) {
+    var dateCol = _resolveColumnIndexForField(lowerHeaders, 'tanggalupdate');
+    if (dateCol !== -1) sheet.getRange(rowIndex + 1, dateCol + 1).setValue(new Date());
+  }
+  SpreadsheetApp.flush();
+  logActivity('Update Staff', String(nik) + ' updated');
+
+  if (hasOperationalChange && typeof processStaffNotification === 'function') {
+    try {
+      var updatedVals = sheet.getRange(rowIndex + 1, 1, 1, headers.length).getValues()[0];
+      var namaCol = _resolveColumnIndexForField(lowerHeaders, 'nama');
+      var jabatanCol = _resolveColumnIndexForField(lowerHeaders, 'jabatan');
+      processStaffNotification(
+        namaCol !== -1 ? String(updatedVals[namaCol] || '').trim() : '',
+        jabatanCol !== -1 ? String(updatedVals[jabatanCol] || '').trim() : '',
+        changedFields,
+        updatedVals,
+        lowerHeaders
+      );
+    } catch (notifyErr) {
+      Logger.log('Notifikasi staf gagal, penyimpanan tetap sukses: ' + notifyErr.toString());
+    }
+  }
+  return getData();
 }
 
 function bulkUpdateStaff(updatesList) {
-  var sheet = getDB().getSheetByName("Staff");
-  var data = sheet.getDataRange().getValues();
-  var headers = data[0];
-  
-  var lowerHeaders = headers.map(function(h) {
-    return String(h || "").toLowerCase().replace(/\s+/g, '');
-  });
-  
-  var updatedCount = 0;
+  if (!Array.isArray(updatesList) || updatesList.length === 0) return getData();
+  var sheet = getDB().getSheetByName('Staff');
+  if (!sheet) throw new Error('Sheet Staff tidak ditemukan.');
+  var range = sheet.getDataRange();
+  var values = range.getValues();
+  var displayValues = range.getDisplayValues();
+  var headers = displayValues[0];
+  var lowerHeaders = headers.map(function(h) { return String(h || '').toLowerCase().replace(/\s+/g, ''); });
   var errors = [];
-  
+  var updatedCount = 0;
+
   for (var u = 0; u < updatesList.length; u++) {
-    var nik = updatesList[u].nik;
-    var updates = updatesList[u].updates;
-    var rowIndex = _findStaffRowIndex(data, lowerHeaders, nik);
-    
-    if (rowIndex !== -1) {
-      var changedFields = {};
-      var isAnyTriggerKey = false;
-      
-      for (var key in updates) {
-        var colIndex = _resolveColumnIndexForField(lowerHeaders, key);
-        if (colIndex !== -1) {
-          var cellRange = sheet.getRange(rowIndex + 1, colIndex + 1);
-          var oldVal = cellRange.getValue();
-          var newVal = updates[key];
-          if (newVal === undefined || newVal === null) newVal = "";
-          
-          if (String(newVal).trim() !== String(oldVal).trim()) {
-            cellRange.setValue(newVal);
-            
-            var cleanKey = String(key).toLowerCase().replace(/[^a-z0-9]/g, '');
-            var isTriggerKey = ['progresscenter', 'statuskerja', 'jamberangkat', 'jampulang', 'statusupload', 'progress', 'status', 'upload'].indexOf(cleanKey) !== -1;
-            if (isTriggerKey) {
-              changedFields[cleanKey] = { oldVal: oldVal, newVal: newVal };
-              isAnyTriggerKey = true;
-            }
-          }
-        }
-      }
-      
-      // Auto update TanggalUpdate column to current Date timestamp
-      if (isAnyTriggerKey) {
-        var idxTglUpdate = _resolveColumnIndexForField(lowerHeaders, "tanggalupdate");
-        if (idxTglUpdate !== -1) {
-          sheet.getRange(rowIndex + 1, idxTglUpdate + 1).setValue(new Date());
-        }
-      }
-
-      // Trigger the unified notification broker once per staff
-      if (isAnyTriggerKey && typeof processStaffNotification === 'function') {
-        try {
-          var updatedVals = sheet.getRange(rowIndex + 1, 1, 1, headers.length).getValues()[0];
-          var namaCol = _resolveColumnIndexForField(lowerHeaders, "nama");
-          var jabatanCol = _resolveColumnIndexForField(lowerHeaders, "jabatan");
-          var nama = namaCol !== -1 ? String(updatedVals[namaCol] || "").trim() : "";
-          var jabatan = jabatanCol !== -1 ? String(updatedVals[jabatanCol] || "").trim() : "";
-          
-          processStaffNotification(nama, jabatan, changedFields, updatedVals, lowerHeaders);
-        } catch (waErr) {
-          Logger.log("Failed to process bulk staff notification: " + waErr.toString());
-        }
-      }
-
-      updatedCount++;
-    } else {
-      errors.push(nik);
+    var item = updatesList[u] || {};
+    var nik = String(item.nik || '').trim();
+    var rowIndex = _findStaffRowIndex(displayValues, lowerHeaders, nik);
+    if (rowIndex === -1) {
+      errors.push(nik || '?');
+      continue;
     }
+    var updates = item.updates || {};
+    for (var key in updates) {
+      if (!Object.prototype.hasOwnProperty.call(updates, key)) continue;
+      var col = _resolveColumnIndexForField(lowerHeaders, key);
+      if (col === -1) continue;
+      var value = updates[key];
+      if (value === undefined || value === null) value = '';
+      sheet.getRange(rowIndex + 1, col + 1).setValue(value);
+    }
+    var dateCol = _resolveColumnIndexForField(lowerHeaders, 'tanggalupdate');
+    if (dateCol !== -1) sheet.getRange(rowIndex + 1, dateCol + 1).setValue(new Date());
+    updatedCount++;
   }
-  
-  if (updatedCount > 0) {
-    var logMsg = updatedCount + " staf diupdate. " + (errors.length > 0 ? ("Gagal perbarui NIK: " + errors.join(", ")) : "");
-    logActivity("Update Staff Massal", logMsg);
-  } else if (errors.length > 0) {
-    throw new Error("Gagal memperbarui semua NIK: " + errors.join(", "));
-  }
-  
+
+  SpreadsheetApp.flush();
+  if (!updatedCount && errors.length) throw new Error('Staf tidak ditemukan: ' + errors.join(', '));
+  logActivity('Update Staff Massal', updatedCount + ' staf diupdate' + (errors.length ? '; tidak ditemukan: ' + errors.join(', ') : ''));
   return getData();
 }
 
@@ -907,69 +673,47 @@ function logActivity(action, details, userName) {
 }
 
 function getFilteredLogs() {
-  var ss = getDB();
-  var sheet = ss.getSheetByName("ActivityLog");
-  if (!sheet) {
-    sheet = ss.insertSheet("ActivityLog");
-    sheet.appendRow(["ID", "Timestamp", "Action", "Details", "User"]);
-    return [];
-  }
-  
+  var sheet = getDB().getSheetByName('ActivityLog');
+  if (!sheet || sheet.getLastRow() <= 1) return [];
   var data = sheet.getDataRange().getValues();
-  if (data.length <= 1) return [];
-  
   var logs = [];
-  var now = new Date();
-  var currentMonth = now.getMonth();
-  var currentYear = now.getFullYear();
-  
-  // We scan bottom-up (excluding headers) to process newest first and safely delete old rows
-  for (var i = data.length - 1; i >= 1; i--) {
-    var id = String(data[i][0] || "").trim();
-    if (id === "") {
-      id = Utilities.getUuid();
-      sheet.getRange(i + 1, 1).setValue(id);
-    }
-    
-    var timestampVal = data[i][1];
-    var action = String(data[i][2] || "");
-    var details = String(data[i][3] || "");
-    var user = String(data[i][4] || "System");
-    
-    var logDate = new Date(timestampVal);
-    if (isNaN(logDate.getTime())) {
-      logDate = new Date();
-    }
-    
-    // Clean up logs from previous months automatically
-    if (logDate.getMonth() === currentMonth && logDate.getFullYear() === currentYear) {
-      logs.push({
-        id: id,
-        timestamp: logDate.toISOString(),
-        action: action,
-        details: details,
-        user: user
-      });
-    } else {
-      sheet.deleteRow(i + 1);
-    }
+  var limit = 300;
+  for (var i = data.length - 1; i >= 1 && logs.length < limit; i--) {
+    var id = String(data[i][0] || '').trim();
+    var timestampValue = data[i][1];
+    var parsed = new Date(timestampValue);
+    logs.push({
+      id: id || ('row:' + (i + 1)),
+      timestamp: isNaN(parsed.getTime()) ? String(timestampValue || '') : parsed.toISOString(),
+      action: String(data[i][2] || ''),
+      details: String(data[i][3] || ''),
+      user: String(data[i][4] || 'System')
+    });
   }
-  
+  // Read-only: membaca log tidak boleh menghapus/mengubah baris Spreadsheet.
   return logs;
 }
 
 function deleteLog(id) {
-  var ss = getDB();
-  var sheet = ss.getSheetByName("ActivityLog");
-  if (!sheet) return getData();
-  
-  var data = sheet.getDataRange().getValues();
+  var sheet = getDB().getSheetByName('ActivityLog');
+  if (!sheet) throw new Error('Sheet ActivityLog tidak ditemukan.');
+  var target = String(id || '').trim();
+  if (!target) throw new Error('ID log tidak valid.');
+  var data = sheet.getDataRange().getDisplayValues();
+  var rowToDelete = -1;
   for (var i = 1; i < data.length; i++) {
-    if (String(data[i][0] || "").trim() === String(id).trim()) {
-      sheet.deleteRow(i + 1);
+    if (String(data[i][0] || '').trim() === target) {
+      rowToDelete = i + 1;
       break;
     }
   }
+  if (rowToDelete === -1 && target.indexOf('row:') === 0) {
+    var candidate = parseInt(target.substring(4), 10);
+    if (!isNaN(candidate) && candidate > 1 && candidate <= sheet.getLastRow()) rowToDelete = candidate;
+  }
+  if (rowToDelete === -1) throw new Error('Log tidak ditemukan atau sudah dihapus.');
+  sheet.deleteRow(rowToDelete);
+  SpreadsheetApp.flush();
   return getData();
 }
 
@@ -1000,8 +744,7 @@ function resetProgress(isAuto, todayStr) {
   
   var dateToCheck = todayStr || Utilities.formatDate(new Date(), "GMT+7", "yyyy-MM-dd");
   var lastResetDate = String(systemStatus["lastResetDate"] || "").trim();
-  var props = PropertiesService.getScriptProperties();
-  var lastResetProp = String(props.getProperty("LAST_AUTO_RESET_DATE") || "").trim();
+  var lastResetProp = ""; // SystemStatus.lastResetDate adalah marker utama.
   
   // If it has already been reset on this date (check both Sheet & ScriptProperties), skip reset!
   if (lastResetDate === dateToCheck || lastResetProp === dateToCheck) {
@@ -1114,7 +857,7 @@ function resetProgress(isAuto, todayStr) {
   logActivity(logType, logDesc);
 
   try {
-    props.setProperty("LAST_AUTO_RESET_DATE", dateToCheck);
+    // ScriptProperties tidak digunakan; SystemStatus sudah menyimpan marker reset.
   } catch (propErr) {}
 
   // Kirim Notifikasi WhatsApp & Telegram real-time via WhatsApp_Notification script
@@ -1131,143 +874,180 @@ function resetProgress(isAuto, todayStr) {
   return cleanData;
 }
 
+
+
 function manageCompanyProfile(payload) {
-  var sheet = getDB().getSheetByName("CompanyProfile");
-  var data = sheet.getDataRange().getValues();
-  
-  if (payload.actionType === 'add') {
-    sheet.appendRow([Utilities.getUuid(), payload.kategori, payload.informasi, payload.icon || '🏢']);
-    logActivity("Company Profile", "Menambah profil: " + payload.kategori);
-  } else if (payload.actionType === 'edit') {
+  payload = payload || {};
+  var sheet = getDB().getSheetByName('CompanyProfile');
+  if (!sheet) throw new Error('Sheet CompanyProfile tidak ditemukan.');
+  var data = sheet.getDataRange().getDisplayValues();
+  var actionType = String(payload.actionType || '').trim();
+
+  function findRow(id) {
+    var target = String(id || '').trim();
     for (var i = 1; i < data.length; i++) {
-      if (data[i][0] === payload.id) {
-        sheet.getRange(i + 1, 2).setValue(payload.kategori);
-        sheet.getRange(i + 1, 3).setValue(payload.informasi);
-        sheet.getRange(i + 1, 4).setValue(payload.icon);
-        logActivity("Company Profile", "Mengedit profil: " + payload.kategori);
-        break;
-      }
+      if (String(data[i][0] || '').trim() === target) return i + 1;
     }
-  } else if (payload.actionType === 'delete') {
-    for (var i = 1; i < data.length; i++) {
-      if (data[i][0] === payload.id) {
-        sheet.deleteRow(i + 1);
-        logActivity("Company Profile", "Menghapus profil ID: " + payload.id);
-        break;
-      }
-    }
+    return -1;
   }
+
+  if (actionType === 'add') {
+    if (!String(payload.kategori || '').trim()) throw new Error('Kategori profil wajib diisi.');
+    sheet.appendRow([Utilities.getUuid(), String(payload.kategori).trim(), String(payload.informasi || '').trim(), String(payload.icon || '🏢').trim()]);
+  } else if (actionType === 'edit') {
+    var row = findRow(payload.id);
+    if (row === -1) throw new Error('Profil yang akan diedit tidak ditemukan.');
+    sheet.getRange(row, 2, 1, 3).setValues([[
+      String(payload.kategori || '').trim(),
+      String(payload.informasi || '').trim(),
+      String(payload.icon || '🏢').trim()
+    ]]);
+  } else if (actionType === 'delete') {
+    var row = findRow(payload.id);
+    if (row === -1) throw new Error('Profil yang akan dihapus tidak ditemukan.');
+    sheet.deleteRow(row);
+  } else {
+    throw new Error('Action profil tidak dikenal: ' + actionType);
+  }
+  SpreadsheetApp.flush();
+  logActivity('Company Profile', actionType + ': ' + String(payload.kategori || payload.id || ''));
   return getData();
 }
 
 function manageUser(payload) {
-  var sheet = getDB().getSheetByName("Users");
-  var data = sheet.getDataRange().getValues();
-  
-  if (payload.actionType === 'add') {
-    var exists = false;
-    for(var i=1; i<data.length; i++) { if(data[i][0] === payload.username) exists = true; }
-    if(exists) throw new Error("Username sudah ada");
-    sheet.appendRow([payload.username, payload.password, payload.role]);
-    logActivity("User Management", "Menambah user: " + payload.username);
-  } else if (payload.actionType === 'edit') {
+  payload = payload || {};
+  var sheet = getDB().getSheetByName('Users');
+  if (!sheet) throw new Error('Sheet Users tidak ditemukan.');
+  var data = sheet.getDataRange().getDisplayValues();
+  var actionType = String(payload.actionType || '').trim();
+  var username = String(payload.username || '').trim();
+
+  function findUserRow(name) {
+    var target = String(name || '').trim().toLowerCase();
     for (var i = 1; i < data.length; i++) {
-      if (data[i][0] === payload.username) {
-        if (payload.password) sheet.getRange(i + 1, 2).setValue(payload.password);
-        sheet.getRange(i + 1, 3).setValue(payload.role);
-        logActivity("User Management", "Mengedit user: " + payload.username);
-        break;
-      }
+      if (String(data[i][0] || '').trim().toLowerCase() === target) return i + 1;
     }
-  } else if (payload.actionType === 'delete') {
-    for (var i = 1; i < data.length; i++) {
-      if (data[i][0] === payload.username) {
-        sheet.deleteRow(i + 1);
-        logActivity("User Management", "Menghapus user: " + payload.username);
-        break;
-      }
-    }
+    return -1;
   }
+  function countAdmins() {
+    var count = 0;
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][2] || '').trim().toUpperCase() === 'ADMIN') count++;
+    }
+    return count;
+  }
+
+  if (actionType === 'add') {
+    if (!username) throw new Error('Username wajib diisi.');
+    if (!String(payload.password || '').trim()) throw new Error('Password wajib diisi.');
+    if (findUserRow(username) !== -1) throw new Error('Username sudah ada.');
+    sheet.appendRow([username, String(payload.password), String(payload.role || 'USER').trim().toUpperCase()]);
+  } else if (actionType === 'edit') {
+    var row = findUserRow(username);
+    if (row === -1) throw new Error('User tidak ditemukan: ' + username);
+    var oldRole = String(data[row - 1][2] || 'USER').trim().toUpperCase();
+    var newUsername = String(payload.newUsername || username).trim();
+    var newRole = String(payload.role || oldRole).trim().toUpperCase();
+    if (!newUsername) throw new Error('Username baru tidak boleh kosong.');
+    var conflict = findUserRow(newUsername);
+    if (conflict !== -1 && conflict !== row) throw new Error('Username baru sudah digunakan.');
+    if (oldRole === 'ADMIN' && newRole !== 'ADMIN' && countAdmins() <= 1) throw new Error('Admin terakhir tidak dapat diturunkan rolenya.');
+    sheet.getRange(row, 1).setValue(newUsername);
+    if (String(payload.password || '').trim()) sheet.getRange(row, 2).setValue(String(payload.password));
+    sheet.getRange(row, 3).setValue(newRole);
+  } else if (actionType === 'changeRole') {
+    var row = findUserRow(username);
+    if (row === -1) throw new Error('User tidak ditemukan: ' + username);
+    var oldRole = String(data[row - 1][2] || 'USER').trim().toUpperCase();
+    var newRole = String(payload.newRole || 'USER').trim().toUpperCase();
+    if (oldRole === 'ADMIN' && newRole !== 'ADMIN' && countAdmins() <= 1) throw new Error('Admin terakhir tidak dapat diturunkan rolenya.');
+    sheet.getRange(row, 3).setValue(newRole);
+  } else if (actionType === 'delete') {
+    var row = findUserRow(username);
+    if (row === -1) throw new Error('User tidak ditemukan: ' + username);
+    if (String(data[row - 1][2] || '').trim().toUpperCase() === 'ADMIN' && countAdmins() <= 1) throw new Error('Admin terakhir tidak dapat dihapus.');
+    sheet.deleteRow(row);
+  } else {
+    throw new Error('Action user tidak dikenal: ' + actionType);
+  }
+  SpreadsheetApp.flush();
+  logActivity('User Management', actionType + ': ' + username);
   return getData();
 }
 
 function manageStaff(payload) {
-  var sheet = getDB().getSheetByName("Staff");
-  var data = sheet.getDataRange().getValues();
-  var headers = data[0];
-  
-  var lowerHeaders = headers.map(function(h) {
-    return String(h || "").toLowerCase().replace(/\s+/g, '');
-  });
-  
-  if (payload.actionType === 'add') {
-    // Check if NIK already exists
-    var existsIndex = _findStaffRowIndex(data, lowerHeaders, payload.nik);
-    if (existsIndex !== -1) throw new Error("NIK sudah terdaftar!");
-    
-    // Create new row matching headers
-    var newRow = [];
-    var today = Utilities.formatDate(new Date(), Session.getScriptTimeZone() || "GMT", "yyyy-MM-dd");
-    for (var j = 0; j < headers.length; j++) {
-      var headerName = lowerHeaders[j];
-      var val = "";
-      if (headerName === 'nik') val = String(payload.nik).trim();
-      else if (headerName === 'nama') val = payload.nama;
-      else if (headerName === 'jabatan') val = payload.jabatan;
-      else if (headerName === 'statuskerja') val = payload.statusKerja || 'Di Kantor';
-      else if (headerName === 'progresscenter') val = parseInt(payload.progressCenter) || 0;
-      else if (headerName === 'jumlahcenter') val = parseInt(payload.jumlahCenter) || 0;
-      else if (headerName === 'statusupload') val = payload.statusUpload || (parseInt(payload.jumlahCenter) > 0 ? 'Belum upload' : 'Tidak ada Center');
-      else if (headerName === 'jamberangkat') val = payload.jamBerangkat || '';
-      else if (headerName === 'jampulang') val = payload.jamPulang || '';
-      else if (headerName === 'keterangan' || headerName === 'catatan') val = payload.keterangan || '';
-      else if (headerName === 'senin') val = parseInt(payload.senin) || 0;
-      else if (headerName === 'selasa') val = parseInt(payload.selasa) || 0;
-      else if (headerName === 'rabu') val = parseInt(payload.rabu) || 0;
-      else if (headerName === 'kamis') val = parseInt(payload.kamis) || 0;
-      else if (headerName === 'jumat') val = parseInt(payload.jumat) || 0;
-      else if (headerName === 'tanggalupdate') val = today;
-      newRow.push(val);
-    }
-    sheet.appendRow(newRow);
-    logActivity("Staff Management", "Menambah staf: " + payload.nama + " (NIK: " + payload.nik + ")");
-  } else if (payload.actionType === 'edit') {
-    var originalNik = payload.originalNik || payload.nik;
-    var foundIndex = _findStaffRowIndex(data, lowerHeaders, originalNik);
-    if (foundIndex === -1 && payload.nik) {
-      foundIndex = _findStaffRowIndex(data, lowerHeaders, payload.nik);
-    }
-    if (foundIndex === -1) throw new Error("Staf NIK: " + originalNik + " tidak ditemukan!");
-    
-    // Update cells based on resolved header fields
-    for (var j = 0; j < headers.length; j++) {
-      var headerName = lowerHeaders[j];
-      var cellRange = sheet.getRange(foundIndex + 1, j + 1);
-      
-      if (headerName === 'nik' && payload.nik !== undefined) cellRange.setValue(String(payload.nik).trim());
-      else if (headerName === 'nama' && payload.nama !== undefined) cellRange.setValue(payload.nama);
-      else if (headerName === 'jabatan' && payload.jabatan !== undefined) cellRange.setValue(payload.jabatan);
-      else if (headerName === 'statuskerja' && payload.statusKerja !== undefined) cellRange.setValue(payload.statusKerja);
-      else if (headerName === 'jamberangkat' && payload.jamBerangkat !== undefined) cellRange.setValue(payload.jamBerangkat);
-      else if (headerName === 'jampulang' && payload.jamPulang !== undefined) cellRange.setValue(payload.jamPulang);
-      else if (headerName === 'progresscenter' && payload.progressCenter !== undefined) cellRange.setValue(parseInt(payload.progressCenter) || 0);
-      else if (headerName === 'jumlahcenter' && payload.jumlahCenter !== undefined) cellRange.setValue(parseInt(payload.jumlahCenter) || 0);
-      else if (headerName === 'statusupload' && payload.statusUpload !== undefined) cellRange.setValue(payload.statusUpload);
-      else if ((headerName === 'keterangan' || headerName === 'catatan') && payload.keterangan !== undefined) cellRange.setValue(payload.keterangan);
-      else if (headerName === 'senin' && payload.senin !== undefined) cellRange.setValue(parseInt(payload.senin) || 0);
-      else if (headerName === 'selasa' && payload.selasa !== undefined) cellRange.setValue(parseInt(payload.selasa) || 0);
-      else if (headerName === 'rabu' && payload.rabu !== undefined) cellRange.setValue(parseInt(payload.rabu) || 0);
-      else if (headerName === 'kamis' && payload.kamis !== undefined) cellRange.setValue(parseInt(payload.kamis) || 0);
-      else if (headerName === 'jumat' && payload.jumat !== undefined) cellRange.setValue(parseInt(payload.jumat) || 0);
-      else if (headerName === 'tanggalupdate') cellRange.setValue(Utilities.formatDate(new Date(), Session.getScriptTimeZone() || "GMT", "yyyy-MM-dd"));
-    }
-    logActivity("Staff Management", "Mengedit data staf NIK: " + originalNik + " -> Nama: " + payload.nama);
-  } else if (payload.actionType === 'delete') {
-    var foundIndex = _findStaffRowIndex(data, lowerHeaders, payload.nik);
-    if (foundIndex === -1) throw new Error("Staf NIK: " + payload.nik + " tidak ditemukan!");
-    sheet.deleteRow(foundIndex + 1);
-    logActivity("Staff Management", "Menghapus staf NIK: " + payload.nik);
+  payload = payload || {};
+  var sheet = getDB().getSheetByName('Staff');
+  if (!sheet) throw new Error('Sheet Staff tidak ditemukan.');
+  var range = sheet.getDataRange();
+  var displayValues = range.getDisplayValues();
+  var headers = displayValues[0];
+  var lowerHeaders = headers.map(function(h) { return String(h || '').toLowerCase().replace(/\s+/g, ''); });
+  var actionType = String(payload.actionType || '').trim();
+
+  function setCell(row, field, value, asText) {
+    var col = _resolveColumnIndexForField(lowerHeaders, field);
+    if (col === -1) return;
+    var cell = sheet.getRange(row, col + 1);
+    if (asText) cell.setNumberFormat('@');
+    cell.setValue(value === undefined || value === null ? '' : value);
   }
+
+  if (actionType === 'add') {
+    var nik = String(payload.nik || '').trim();
+    var nama = String(payload.nama || '').trim();
+    if (!nik || !nama) throw new Error('NIK dan Nama staf wajib diisi.');
+    if (_findStaffRowIndex(displayValues, lowerHeaders, nik) !== -1) throw new Error('NIK sudah terdaftar: ' + nik);
+    var rowNum = sheet.getLastRow() + 1;
+    setCell(rowNum, 'nik', nik, true);
+    setCell(rowNum, 'nama', nama, false);
+    setCell(rowNum, 'jabatan', String(payload.jabatan || 'FIELD OFFICER'), false);
+    setCell(rowNum, 'statusKerja', String(payload.statusKerja || 'Di Kantor'), false);
+    setCell(rowNum, 'jamBerangkat', String(payload.jamBerangkat || ''), false);
+    setCell(rowNum, 'jamPulang', String(payload.jamPulang || ''), false);
+    setCell(rowNum, 'progressCenter', Number(payload.progressCenter) || 0, false);
+    setCell(rowNum, 'jumlahCenter', Number(payload.jumlahCenter) || 0, false);
+    setCell(rowNum, 'statusUpload', String(payload.statusUpload || ((Number(payload.jumlahCenter) || 0) > 0 ? 'Belum upload' : 'Tidak ada Center')), false);
+    setCell(rowNum, 'keterangan', String(payload.keterangan || ''), false);
+    ['senin', 'selasa', 'rabu', 'kamis', 'jumat'].forEach(function(day) { setCell(rowNum, day, Number(payload[day]) || 0, false); });
+    setCell(rowNum, 'tanggalUpdate', Utilities.formatDate(new Date(), 'Asia/Jakarta', 'yyyy-MM-dd HH:mm:ss'), false);
+    logActivity('Staff Management', 'Menambah staf: ' + nama + ' (NIK: ' + nik + ')');
+  } else if (actionType === 'edit') {
+    var originalNik = String(payload.originalNik || payload.nik || '').trim();
+    var rowIndex = _findStaffRowIndex(displayValues, lowerHeaders, originalNik);
+    if (rowIndex === -1) throw new Error('Staf NIK: ' + originalNik + ' tidak ditemukan.');
+    var rowNum = rowIndex + 1;
+    var newNik = String(payload.nik || originalNik).trim();
+    if (!newNik) throw new Error('NIK staf tidak boleh kosong.');
+    if (getNormalizedNikValue(newNik) !== getNormalizedNikValue(originalNik)) {
+      var conflict = _findStaffRowIndex(displayValues, lowerHeaders, newNik);
+      if (conflict !== -1 && conflict !== rowIndex) throw new Error('NIK baru sudah digunakan staf lain: ' + newNik);
+    }
+    setCell(rowNum, 'nik', newNik, true);
+    if (payload.nama !== undefined) setCell(rowNum, 'nama', String(payload.nama).trim(), false);
+    if (payload.jabatan !== undefined) setCell(rowNum, 'jabatan', payload.jabatan, false);
+    if (payload.statusKerja !== undefined) setCell(rowNum, 'statusKerja', payload.statusKerja, false);
+    if (payload.jamBerangkat !== undefined) setCell(rowNum, 'jamBerangkat', payload.jamBerangkat, false);
+    if (payload.jamPulang !== undefined) setCell(rowNum, 'jamPulang', payload.jamPulang, false);
+    if (payload.progressCenter !== undefined) setCell(rowNum, 'progressCenter', Number(payload.progressCenter) || 0, false);
+    if (payload.jumlahCenter !== undefined) setCell(rowNum, 'jumlahCenter', Number(payload.jumlahCenter) || 0, false);
+    if (payload.statusUpload !== undefined) setCell(rowNum, 'statusUpload', payload.statusUpload, false);
+    if (payload.keterangan !== undefined) setCell(rowNum, 'keterangan', payload.keterangan, false);
+    ['senin', 'selasa', 'rabu', 'kamis', 'jumat'].forEach(function(day) {
+      if (payload[day] !== undefined) setCell(rowNum, day, Number(payload[day]) || 0, false);
+    });
+    setCell(rowNum, 'tanggalUpdate', Utilities.formatDate(new Date(), 'Asia/Jakarta', 'yyyy-MM-dd HH:mm:ss'), false);
+    logActivity('Staff Management', 'Mengedit staf: ' + originalNik + (newNik !== originalNik ? ' -> ' + newNik : ''));
+  } else if (actionType === 'delete') {
+    var nik = String(payload.nik || '').trim();
+    var rowIndex = _findStaffRowIndex(displayValues, lowerHeaders, nik);
+    if (rowIndex === -1) throw new Error('Staf NIK: ' + nik + ' tidak ditemukan atau sudah dihapus.');
+    sheet.deleteRow(rowIndex + 1);
+    logActivity('Staff Management', 'Menghapus staf NIK: ' + nik);
+  } else {
+    throw new Error('Action staf tidak dikenal: ' + actionType);
+  }
+  SpreadsheetApp.flush();
   return getData();
 }
 

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useStore, Staff, CompanyProfile, SystemStatus, parseNIKForSort, isFieldOfficer, cleanEmojiString } from '../lib/store';
-import { Users, Briefcase, CheckCircle, AlertTriangle, Clock, RefreshCw, X, LayoutDashboard, Activity, Server, ChevronRight, Target, UploadCloud, Building2, Plus, UserPlus, Edit2, Trash2, Shield, Search, Filter, ArrowUpDown, LayoutGrid, List, Check, Save, Link2, KeyRound, Eye, EyeOff, Lock, Copy, CheckSquare, Sparkles } from 'lucide-react';
+import { Users, Briefcase, CheckCircle, AlertTriangle, Clock, RefreshCw, X, LayoutDashboard, Activity, Server, ChevronRight, Target, UploadCloud, Building2, Plus, UserPlus, Edit2, Trash2, Shield, Search, Filter, ArrowUpDown, LayoutGrid, List, Check, Save, Link2, KeyRound, Eye, EyeOff, Lock, Copy, CheckSquare, Sparkles, Loader2 } from 'lucide-react';
 import { getStoredPin, setStoredPin } from './PinLockModal';
 import { cn } from '../lib/utils';
 import { differenceInSeconds, differenceInMinutes, differenceInHours, differenceInDays, format } from 'date-fns';
@@ -759,7 +759,7 @@ export const getPathFromTab = (tab: TabType): string => {
 };
 
 export function Dashboard() {
-  const { user, staff, systemStatus, options, companyProfile, usersList, updateStaff, updateMultipleStaff, updateSystemStatus, isLoading, fetchData, lastUpdatedStaff, lastUpdatedSystem, lastUpdatedCompany, lastUpdatedUsers, manageCompanyProfile, manageUser, resetProgress, isKioskMode, setKioskMode, activityLogs, deleteLog, resetAppCache } = useStore();
+  const { user, staff, systemStatus, options, companyProfile, usersList, updateStaff, updateMultipleStaff, updateSystemStatus, isLoading, isUpdating, fetchData, lastUpdatedStaff, lastUpdatedSystem, lastUpdatedCompany, lastUpdatedUsers, manageCompanyProfile, manageUser, resetProgress, isKioskMode, setKioskMode, activityLogs, deleteLog, resetAppCache } = useStore();
   const selesaiHistory = useSystemSelesaiHistory(activityLogs, staff, systemStatus, lastUpdatedStaff, lastUpdatedSystem);
   const [editingStaff, setEditingStaff] = useState<Staff | null>(null);
   const [editingSystem, setEditingSystem] = useState(false);
@@ -834,6 +834,37 @@ export function Dashboard() {
   const [editJamPulang, setEditJamPulang] = useState('');
   const [editStatusKerja, setEditStatusKerja] = useState('');
 
+
+  // Feedback per staf: klik cepat selalu memberi tanda proses dan hasil.
+  const [processingStaffNik, setProcessingStaffNik] = useState<string | null>(null);
+  const [recentlySavedStaffNik, setRecentlySavedStaffNik] = useState<string | null>(null);
+  const staffFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (staffFeedbackTimerRef.current) clearTimeout(staffFeedbackTimerRef.current);
+  }, []);
+
+  const runStaffFeedbackAction = async (staffMember: Staff, action: () => Promise<void>, successMessage: string) => {
+    if (processingStaffNik || isUpdating) return;
+    if (staffFeedbackTimerRef.current) clearTimeout(staffFeedbackTimerRef.current);
+    setRecentlySavedStaffNik(null);
+    setProcessingStaffNik(staffMember.nik);
+    const toastId = toast.loading(`Menyimpan ${staffMember.nama} ke Spreadsheet...`);
+    try {
+      await action();
+      setRecentlySavedStaffNik(staffMember.nik);
+      toast.success(successMessage, { id: toastId });
+      staffFeedbackTimerRef.current = setTimeout(() => {
+        setRecentlySavedStaffNik((current) => current === staffMember.nik ? null : current);
+      }, 2200);
+    } catch (error: any) {
+      toast.error(error?.message ? `Gagal menyimpan ${staffMember.nama}: ${error.message}` : `Gagal menyimpan ${staffMember.nama}`, { id: toastId });
+      throw error;
+    } finally {
+      setProcessingStaffNik((current) => current === staffMember.nik ? null : current);
+    }
+  };
+
   // Local state for Company Profile
   const [editingCp, setEditingCp] = useState<CompanyProfile | null>(null);
   const [showCpModal, setShowCpModal] = useState(false);
@@ -859,6 +890,7 @@ export function Dashboard() {
   const [originalUsername, setOriginalUsername] = useState('');
   const [showEditUserPass, setShowEditUserPass] = useState(false);
   const [showEditUserPin, setShowEditUserPin] = useState(false);
+  const [pendingUserSavePayload, setPendingUserSavePayload] = useState<any | null>(null);
 
   // Toggle reveal password and PIN in User Management table
   const [revealedPasswords, setRevealedPasswords] = useState<{ [key: string]: boolean }>({});
@@ -1192,64 +1224,103 @@ export function Dashboard() {
   };
 
   const handleCpDeleteSubmit = async () => {
-    if (!cpToDelete) return;
-    await manageCompanyProfile({ actionType: 'delete', id: cpToDelete });
-    setShowDeleteCpModal(false);
-    setCpToDelete(null);
+    if (!cpToDelete || isUpdating) return;
+    try {
+      await manageCompanyProfile({ actionType: 'delete', id: cpToDelete });
+      toast.success('Profil berhasil dihapus dari Spreadsheet.');
+      setShowDeleteCpModal(false);
+      setCpToDelete(null);
+    } catch (error: any) {
+      toast.error(error?.message || 'Gagal menghapus profil.');
+    }
   };
 
   const handleResetProgress = async () => {
-    await resetProgress();
-    setShowResetModal(false);
+    if (isUpdating) return;
+    try {
+      await resetProgress();
+      toast.success('Reset berhasil disimpan ke Spreadsheet.');
+      setShowResetModal(false);
+    } catch (error: any) {
+      toast.error(error?.message || 'Reset gagal.');
+    }
   };
 
   const handleAddUserSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!newUsername.trim() || !newUserPassword.trim()) return;
-    const cleanPin = newUserPin.trim() || '1234';
-    await manageUser({ 
-      actionType: 'add', 
-      username: newUsername.trim(), 
-      role: newUserRole, 
+    if (!newUsername.trim() || !newUserPassword.trim()) {
+      toast.error('Username dan password wajib diisi.');
+      return;
+    }
+    setPendingUserSavePayload({
+      actionType: 'add',
+      username: newUsername.trim(),
+      role: newUserRole,
       password: newUserPassword,
-      pin: cleanPin
+      localPin: newUserPin.trim() || '1234'
     });
-    setStoredPin(cleanPin, newUsername.trim());
-    setShowAddUserModal(false);
-    setNewUsername('');
-    setNewUserRole('USER');
-    setNewUserPassword('');
-    setNewUserPin('1234');
   };
 
   const handleEditUserSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!editUsername.trim()) return;
-    const cleanPin = editUserPin.trim() || '1234';
-    await manageUser({ 
-      actionType: 'edit', 
-      username: originalUsername, 
-      newUsername: editUsername.trim(), 
-      role: editUserRole, 
+    if (!editUsername.trim()) {
+      toast.error('Username tidak boleh kosong.');
+      return;
+    }
+    setPendingUserSavePayload({
+      actionType: 'edit',
+      username: originalUsername,
+      newUsername: editUsername.trim(),
+      role: editUserRole,
       password: editUserPassword,
-      pin: cleanPin
+      localPin: editUserPin.trim() || '1234'
     });
-    setStoredPin(cleanPin, editUsername.trim());
-    setShowEditUserModal(false);
+  };
+
+  const handleConfirmUserSave = async () => {
+    if (!pendingUserSavePayload || isUpdating) return;
+    const { localPin, ...serverPayload } = pendingUserSavePayload;
+    try {
+      await manageUser(serverPayload);
+      const finalUsername = serverPayload.newUsername || serverPayload.username;
+      setStoredPin(localPin || '1234', finalUsername);
+      toast.success(serverPayload.actionType === 'add' ? 'User berhasil ditambahkan.' : 'Perubahan user berhasil disimpan.');
+      setPendingUserSavePayload(null);
+      setShowAddUserModal(false);
+      setShowEditUserModal(false);
+      if (serverPayload.actionType === 'add') {
+        setNewUsername('');
+        setNewUserRole('USER');
+        setNewUserPassword('');
+        setNewUserPin('1234');
+      }
+    } catch (error: any) {
+      toast.error(error?.message || 'Gagal menyimpan user.');
+    }
   };
 
   const handleDeleteUserSubmit = async () => {
-    if (!userToDelete) return;
-    await manageUser({ actionType: 'delete', username: userToDelete });
-    setShowDeleteUserModal(false);
-    setUserToDelete('');
+    if (!userToDelete || isUpdating) return;
+    try {
+      await manageUser({ actionType: 'delete', username: userToDelete });
+      toast.success(`User ${userToDelete} berhasil dihapus.`);
+      setShowDeleteUserModal(false);
+      setUserToDelete('');
+    } catch (error: any) {
+      toast.error(error?.message || 'Gagal menghapus user.');
+    }
   };
 
   const handleChangeRoleSubmit = async () => {
-    if (!userToChangeRole) return;
-    await manageUser({ actionType: 'changeRole', username: userToChangeRole, newRole: newRoleSelection });
-    setShowChangeRoleModal(false);
-    setUserToChangeRole('');
+    if (!userToChangeRole || isUpdating) return;
+    try {
+      await manageUser({ actionType: 'changeRole', username: userToChangeRole, newRole: newRoleSelection });
+      toast.success(`Role ${userToChangeRole} berhasil diubah menjadi ${newRoleSelection}.`);
+      setShowChangeRoleModal(false);
+      setUserToChangeRole('');
+    } catch (error: any) {
+      toast.error(error?.message || 'Gagal mengubah role user.');
+    }
   };
 
   const handleAddStaffSubmit = (e: React.FormEvent<HTMLFormElement>) => {
@@ -1294,8 +1365,9 @@ export function Dashboard() {
       setNewStaffRabu(0);
       setNewStaffKamis(0);
       setNewStaffJumat(0);
-    } catch(err) {
-      // Handled by store
+      toast.success('Staf baru berhasil disimpan ke Spreadsheet.');
+    } catch(err: any) {
+      toast.error(err?.message || 'Gagal menambah staf.');
     }
   };
 
@@ -1359,8 +1431,9 @@ export function Dashboard() {
       setShowConfirmSaveStaffModal(false);
       setShowEditStaffCatalogModal(null);
       setPendingStaffSavePayload(null);
-    } catch(err) {
-      // Handled by store
+      toast.success('Perubahan data staf berhasil disimpan.');
+    } catch(err: any) {
+      toast.error(err?.message || 'Gagal menyimpan perubahan staf.');
     }
   };
 
@@ -1373,8 +1446,9 @@ export function Dashboard() {
     try {
       await useStore.getState().manageStaff(payload);
       setShowDeleteStaffConfirmModal(null);
-    } catch(err) {
-      // Handled by store
+      toast.success('Data staf berhasil dihapus dari Spreadsheet.');
+    } catch(err: any) {
+      toast.error(err?.message || 'Gagal menghapus staf.');
     }
   };
 
@@ -1408,6 +1482,7 @@ export function Dashboard() {
   };
 
   const handleQuickStatusKerjaUpdate = async (staff: Staff, newStatus: string) => {
+    if (processingStaffNik || isUpdating) return;
     const updates: Partial<Staff> = { statusKerja: newStatus as any };
     if (newStatus === 'Di Lapangan') {
       updates.jamBerangkat = format(new Date(), 'HH:mm');
@@ -1417,53 +1492,39 @@ export function Dashboard() {
       updates.jamBerangkat = '';
       updates.jamPulang = '';
     }
-    await updateStaff(staff.nik, updates);
+    try {
+      await runStaffFeedbackAction(staff, () => updateStaff(staff.nik, updates), `Status ${staff.nama} tersimpan: ${newStatus}`);
+    } catch {}
   };
 
   const handleQuickUploadToggle = async (staff: Staff) => {
-    if (!canEditStaff || isLoading) return;
+    if (!canEditStaff || isLoading || isUpdating || processingStaffNik) return;
     if (staff.jumlahCenter === 0) return;
-    
     const isCompleted = staff.statusUpload === 'Sudah upload semua';
     const newStatus = isCompleted ? 'Belum upload' : 'Sudah upload semua';
     const newProgress = isCompleted ? 0 : staff.jumlahCenter;
-    
     try {
-      await updateStaff(staff.nik, {
-        progressCenter: newProgress,
-        statusUpload: newStatus as any
-      });
-      toast.success(`Upload ${staff.nama} diubah ke ${newStatus === 'Sudah upload semua' ? 'Selesai' : 'Belum Mulai'}`);
-    } catch (e: any) {
-      toast.error('Gagal memperbarui status upload');
-    }
+      await runStaffFeedbackAction(
+        staff,
+        () => updateStaff(staff.nik, { progressCenter: newProgress, statusUpload: newStatus as any }),
+        `${staff.nama}: ${newStatus === 'Sudah upload semua' ? 'Selesai' : 'Belum Mulai'} tersimpan`
+      );
+    } catch {}
   };
 
   const handleQuickProgressUpdate = async (staff: Staff, change: number) => {
-    if (!canEditStaff || isLoading) return;
+    if (!canEditStaff || isLoading || isUpdating || processingStaffNik) return;
     if (staff.jumlahCenter === 0) return;
-    
     const newProgress = Math.min(Math.max(0, staff.progressCenter + change), staff.jumlahCenter);
     if (newProgress === staff.progressCenter) return;
-    
-    let newStatus = 'Belum upload';
-    if (newProgress === 0) {
-      newStatus = 'Belum upload';
-    } else if (newProgress >= staff.jumlahCenter) {
-      newStatus = 'Sudah upload semua';
-    } else {
-      newStatus = 'Sebagian upload';
-    }
-    
+    const newStatus = newProgress === 0 ? 'Belum upload' : newProgress >= staff.jumlahCenter ? 'Sudah upload semua' : 'Sebagian upload';
     try {
-      await updateStaff(staff.nik, {
-        progressCenter: newProgress,
-        statusUpload: newStatus as any
-      });
-      toast.success(`Progress ${staff.nama} diubah ke ${newProgress}/${staff.jumlahCenter}`);
-    } catch (e: any) {
-      toast.error('Gagal memperbarui progress center');
-    }
+      await runStaffFeedbackAction(
+        staff,
+        () => updateStaff(staff.nik, { progressCenter: newProgress, statusUpload: newStatus as any }),
+        `Progress ${staff.nama} tersimpan: ${newProgress}/${staff.jumlahCenter}`
+      );
+    } catch {}
   };
 
   const handleQuickSystemUpdate = async (field: keyof SystemStatus, value: string) => {
@@ -1756,7 +1817,7 @@ export function Dashboard() {
                       <select 
                         value={systemStatus.statusSistem}
                         onChange={(e) => handleQuickSystemUpdate('statusSistem', e.target.value)}
-                        disabled={isLoading}
+                        disabled={isLoading || isUpdating}
                         className="text-xs font-bold text-violet-700 dark:text-violet-300 bg-violet-50 dark:bg-slate-900 border border-violet-100 dark:border-slate-700 rounded-lg py-0.5 px-2 focus:ring-1 focus:ring-violet-500 cursor-pointer shadow-sm hover:border-violet-300"
                       >
                         {getUniqueOptions(options?.statusSistem, systemStatus.statusSistem, 'Normal', 'Sistem Dikunci', 'Lambat', 'Gangguan').map((opt, idx) => (
@@ -1846,7 +1907,7 @@ export function Dashboard() {
               <div className="flex items-center gap-1.5 sm:gap-2">
                 <button
                   onClick={() => fetchData()}
-                  disabled={isLoading}
+                  disabled={isLoading || isUpdating}
                   className="p-1.5 text-slate-400 hover:text-violet-600 dark:hover:text-violet-400 rounded-xl hover:bg-violet-50 dark:hover:bg-violet-950/40 border border-transparent hover:border-violet-100/10 transition-all cursor-pointer"
                   title="Refresh Data"
                 >
@@ -2036,13 +2097,15 @@ export function Dashboard() {
                     {filteredAndSortedStaff.map((s, idx) => {
                       const isSelesai = s.statusUpload === 'Sudah upload semua';
                       const isBelum = s.statusUpload === 'Belum upload';
+                      const isProcessing = processingStaffNik === s.nik;
+                      const isJustSaved = recentlySavedStaffNik === s.nik;
                       const symbol = isSelesai ? '✅' : isBelum ? '❌' : '➖';
 
                       return (
                         <div
                           key={`${s.nik || 'staff'}-${idx}`}
                           onClick={() => {
-                            if (canEditStaff && s.jumlahCenter > 0) {
+                            if (canEditStaff && s.jumlahCenter > 0 && !processingStaffNik && !isUpdating) {
                               handleQuickUploadToggle(s);
                             }
                           }}
@@ -2054,10 +2117,10 @@ export function Dashboard() {
                         >
                           <div className="flex items-center gap-3 min-w-0">
                             <span className="text-base sm:text-lg shrink-0 leading-none select-none">
-                              {symbol}
+                              {isProcessing ? <Loader2 className="w-4 h-4 animate-spin text-violet-600" /> : isJustSaved ? <CheckCircle className="w-4 h-4 text-emerald-600" /> : symbol}
                             </span>
                             <span className={cn(
-                              "text-sm font-bold truncate transition-colors",
+                              "text-sm font-bold break-words leading-snug transition-colors",
                               isSelesai 
                                 ? "text-emerald-700 dark:text-emerald-400 font-extrabold" 
                                 : isBelum 
@@ -2082,7 +2145,7 @@ export function Dashboard() {
                                   ? "bg-rose-100 dark:bg-rose-955/40 text-rose-700 dark:text-rose-400" 
                                   : "bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400"
                             )}>
-                              {isSelesai ? 'Selesai' : isBelum ? 'Belum' : s.statusUpload}
+                              {isProcessing ? 'Menyimpan…' : isJustSaved ? 'Tersimpan' : isSelesai ? 'Selesai' : isBelum ? 'Belum' : s.statusUpload}
                             </span>
                             {isAdmin && (
                               <button
@@ -2751,7 +2814,7 @@ export function Dashboard() {
                   <select 
                     value={systemStatus.statusKantor}
                     onChange={(e) => handleQuickSystemUpdate('statusKantor', e.target.value)}
-                    disabled={isLoading}
+                    disabled={isLoading || isUpdating}
                     className="w-full font-bold text-xs sm:text-sm text-gray-900 dark:text-white bg-transparent border-none p-0 focus:ring-0 cursor-pointer appearance-none break-words whitespace-normal leading-normal"
                     style={{ backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`, backgroundPosition: 'right 0 center', backgroundRepeat: 'no-repeat', backgroundSize: '1.25em 1.25em' }}
                   >
@@ -2774,7 +2837,7 @@ export function Dashboard() {
                   <select 
                     value={systemStatus.statusSistem}
                     onChange={(e) => handleQuickSystemUpdate('statusSistem', e.target.value)}
-                    disabled={isLoading}
+                    disabled={isLoading || isUpdating}
                     className="w-full font-bold text-xs sm:text-sm text-gray-900 dark:text-white bg-transparent border-none p-0 focus:ring-0 cursor-pointer appearance-none break-words whitespace-normal leading-normal"
                     style={{ backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`, backgroundPosition: 'right 0 center', backgroundRepeat: 'no-repeat', backgroundSize: '1.25em 1.25em' }}
                   >
@@ -2797,7 +2860,7 @@ export function Dashboard() {
                   <select 
                     value={cleanEmojiString(systemStatus.statusMSA)}
                     onChange={(e) => handleQuickMSAUpdate(e.target.value)}
-                    disabled={isLoading}
+                    disabled={isLoading || isUpdating}
                     className="w-full font-bold text-xs sm:text-sm text-gray-900 dark:text-white bg-transparent border-none p-0 focus:ring-0 cursor-pointer appearance-none break-words whitespace-normal leading-normal"
                     style={{ backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`, backgroundPosition: 'right 0 center', backgroundRepeat: 'no-repeat', backgroundSize: '1.25em 1.25em' }}
                   >
@@ -2820,7 +2883,7 @@ export function Dashboard() {
                   <select 
                     value={systemStatus.statusFSA}
                     onChange={(e) => handleQuickSystemUpdate('statusFSA', e.target.value)}
-                    disabled={isLoading}
+                    disabled={isLoading || isUpdating}
                     className="w-full font-bold text-xs sm:text-sm text-gray-900 dark:text-white bg-transparent border-none p-0 focus:ring-0 cursor-pointer appearance-none break-words whitespace-normal leading-normal"
                     style={{ backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`, backgroundPosition: 'right 0 center', backgroundRepeat: 'no-repeat', backgroundSize: '1.25em 1.25em' }}
                   >
@@ -2843,7 +2906,7 @@ export function Dashboard() {
                   <select 
                     value={cleanEmojiString(systemStatus.statusManager || '')}
                     onChange={(e) => handleQuickSystemUpdate('statusManager', e.target.value)}
-                    disabled={isLoading}
+                    disabled={isLoading || isUpdating}
                     className="w-full font-bold text-xs sm:text-sm text-gray-900 dark:text-white bg-transparent border-none p-0 focus:ring-0 cursor-pointer appearance-none break-words whitespace-normal leading-normal"
                     style={{ backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`, backgroundPosition: 'right 0 center', backgroundRepeat: 'no-repeat', backgroundSize: '1.25em 1.25em' }}
                   >
@@ -2866,7 +2929,7 @@ export function Dashboard() {
                   <select 
                     value={cleanEmojiString(systemStatus.statusAsistenManager || '')}
                     onChange={(e) => handleQuickSystemUpdate('statusAsistenManager', e.target.value)}
-                    disabled={isLoading}
+                    disabled={isLoading || isUpdating}
                     className="w-full font-bold text-xs sm:text-sm text-gray-900 dark:text-white bg-transparent border-none p-0 focus:ring-0 cursor-pointer appearance-none break-words whitespace-normal leading-normal"
                     style={{ backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`, backgroundPosition: 'right 0 center', backgroundRepeat: 'no-repeat', backgroundSize: '1.25em 1.25em' }}
                   >
@@ -2889,7 +2952,7 @@ export function Dashboard() {
                   <select
                     value={systemStatus.statusBalancing}
                     onChange={(e) => handleQuickSystemUpdate('statusBalancing', e.target.value)}
-                    disabled={isLoading}
+                    disabled={isLoading || isUpdating}
                     className={cn(
                       "inline-flex items-center px-3 py-1.5 rounded-lg text-xs sm:text-sm font-extrabold border-0 cursor-pointer focus:ring-2 focus:ring-violet-500 appearance-none pr-8",
                       systemStatus.statusBalancing === 'Balance' || systemStatus.statusBalancing === 'Selesai' ? "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400" :
@@ -3805,7 +3868,7 @@ export function Dashboard() {
               
               <div className="pt-5 flex justify-end gap-3 border-t border-gray-100 dark:border-gray-700">
                 <button type="button" onClick={() => setEditingStaff(null)} className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors">Batal</button>
-                <button type="submit" disabled={isLoading} className="px-4 py-2 text-sm font-medium text-white bg-violet-600 hover:bg-violet-700 rounded-lg disabled:opacity-50 transition-colors shadow-sm">Simpan Perubahan</button>
+                <button type="submit" disabled={isLoading || isUpdating} className="px-4 py-2 text-sm font-medium text-white bg-violet-600 hover:bg-violet-700 rounded-lg disabled:opacity-50 transition-colors shadow-sm">Simpan Perubahan</button>
               </div>
             </form>
           </div>
@@ -4000,7 +4063,7 @@ export function Dashboard() {
               
               <div className="pt-5 flex justify-end gap-3 border-t border-gray-100 dark:border-gray-700">
                 <button type="button" onClick={() => setEditingSystem(false)} className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors">Batal</button>
-                <button type="submit" disabled={isLoading} className="px-4 py-2 text-sm font-medium text-white bg-violet-600 hover:bg-violet-700 rounded-lg disabled:opacity-50 transition-colors shadow-sm">Simpan Perubahan</button>
+                <button type="submit" disabled={isLoading || isUpdating} className="px-4 py-2 text-sm font-medium text-white bg-violet-600 hover:bg-violet-700 rounded-lg disabled:opacity-50 transition-colors shadow-sm">Simpan Perubahan</button>
               </div>
             </form>
           </div>
@@ -4073,7 +4136,7 @@ export function Dashboard() {
 
               <div className="pt-5 flex justify-end gap-3 border-t border-gray-100 dark:border-gray-700">
                 <button type="button" onClick={() => setShowBulkEditModal(false)} className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors">Batal</button>
-                <button type="submit" disabled={isLoading} className="px-4 py-2 text-sm font-medium text-white bg-violet-600 hover:bg-violet-700 rounded-lg disabled:opacity-50 transition-colors shadow-sm">Update Terpilih</button>
+                <button type="submit" disabled={isLoading || isUpdating} className="px-4 py-2 text-sm font-medium text-white bg-violet-600 hover:bg-violet-700 rounded-lg disabled:opacity-50 transition-colors shadow-sm">Update Terpilih</button>
               </div>
             </form>
           </div>
@@ -4105,7 +4168,7 @@ export function Dashboard() {
               </div>
               <div className="pt-5 flex justify-end gap-3 border-t border-gray-100 dark:border-gray-700">
                 <button type="button" onClick={() => setShowCpModal(false)} className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors">Batal</button>
-                <button type="submit" disabled={isLoading} className="px-4 py-2 text-sm font-medium text-white bg-violet-600 hover:bg-violet-700 rounded-lg disabled:opacity-50 transition-colors shadow-sm">Simpan</button>
+                <button type="submit" disabled={isLoading || isUpdating} className="px-4 py-2 text-sm font-medium text-white bg-violet-600 hover:bg-violet-700 rounded-lg disabled:opacity-50 transition-colors shadow-sm">Simpan</button>
               </div>
             </form>
           </div>
@@ -4283,6 +4346,38 @@ export function Dashboard() {
         </div>
       )}
 
+      {/* Confirm Add/Edit User */}
+      {pendingUserSavePayload && (
+        <div className="fixed inset-0 bg-slate-950/65 backdrop-blur-md flex items-center justify-center z-[60] p-4 animate-in fade-in duration-200">
+          <div className="w-full max-w-sm overflow-hidden rounded-3xl border border-violet-300/30 dark:border-violet-700/30 bg-white dark:bg-slate-900 shadow-2xl animate-in zoom-in-95 duration-200">
+            <div className="p-6 text-center space-y-4">
+              <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-violet-100 text-violet-700 dark:bg-violet-950/60 dark:text-violet-300">
+                <Shield className="w-7 h-7" />
+              </div>
+              <div>
+                <h3 className="text-lg font-black text-slate-900 dark:text-white">
+                  {pendingUserSavePayload.actionType === 'add' ? 'Tambah User Baru?' : 'Simpan Perubahan User?'}
+                </h3>
+                <p className="mt-1 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+                  Data akan ditulis langsung ke sheet Users pada KMD Check Database.
+                </p>
+              </div>
+              <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/50 p-4 text-left text-xs space-y-2">
+                <div className="flex justify-between gap-3"><span className="text-slate-500">Username</span><strong className="text-slate-900 dark:text-white">{pendingUserSavePayload.newUsername || pendingUserSavePayload.username}</strong></div>
+                <div className="flex justify-between gap-3"><span className="text-slate-500">Role</span><strong className="text-violet-700 dark:text-violet-300">{pendingUserSavePayload.role}</strong></div>
+                <div className="flex justify-between gap-3"><span className="text-slate-500">Password</span><strong className="text-slate-900 dark:text-white">{pendingUserSavePayload.password ? 'Akan diperbarui' : 'Tetap'}</strong></div>
+              </div>
+              <div className="grid grid-cols-2 gap-3 pt-1">
+                <button type="button" disabled={isUpdating} onClick={() => setPendingUserSavePayload(null)} className="rounded-xl bg-slate-100 dark:bg-slate-800 px-4 py-2.5 text-xs font-bold text-slate-700 dark:text-slate-200 disabled:opacity-50">Cek Lagi</button>
+                <button type="button" disabled={isUpdating} onClick={handleConfirmUserSave} className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 px-4 py-2.5 text-xs font-extrabold text-white shadow-md disabled:opacity-50">
+                  {isUpdating ? <><Loader2 className="w-4 h-4 animate-spin" /> Memproses…</> : <><Check className="w-4 h-4" /> Ya, Simpan</>}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Delete User Confirmation Modal */}
       {showDeleteUserModal && (
         <div className="fixed inset-0 bg-gray-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
@@ -4296,7 +4391,7 @@ export function Dashboard() {
             </p>
             <div className="flex justify-center gap-3">
               <button onClick={() => setShowDeleteUserModal(false)} className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors">Batal</button>
-              <button onClick={handleDeleteUserSubmit} disabled={isLoading} className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg disabled:opacity-50 transition-colors shadow-sm">Ya, Hapus</button>
+              <button onClick={handleDeleteUserSubmit} disabled={isLoading || isUpdating} className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg disabled:opacity-50 transition-colors shadow-sm">Ya, Hapus</button>
             </div>
           </div>
         </div>
@@ -4315,7 +4410,7 @@ export function Dashboard() {
             </p>
             <div className="flex justify-center gap-3">
               <button onClick={() => setShowChangeRoleModal(false)} className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors">Batal</button>
-              <button onClick={handleChangeRoleSubmit} disabled={isLoading} className="px-4 py-2 text-sm font-medium text-white bg-violet-600 hover:bg-violet-700 rounded-lg disabled:opacity-50 transition-colors shadow-sm">Ya, Ubah Role</button>
+              <button onClick={handleChangeRoleSubmit} disabled={isLoading || isUpdating} className="px-4 py-2 text-sm font-medium text-white bg-violet-600 hover:bg-violet-700 rounded-lg disabled:opacity-50 transition-colors shadow-sm">Ya, Ubah Role</button>
             </div>
           </div>
         </div>
@@ -4334,7 +4429,7 @@ export function Dashboard() {
             </p>
             <div className="flex justify-center gap-3">
               <button onClick={() => setShowResetModal(false)} className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors">Batal</button>
-              <button onClick={handleResetProgress} disabled={isLoading} className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg disabled:opacity-50 transition-colors shadow-sm">Ya, Reset Semua Data</button>
+              <button onClick={handleResetProgress} disabled={isLoading || isUpdating} className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg disabled:opacity-50 transition-colors shadow-sm">Ya, Reset Semua Data</button>
             </div>
           </div>
         </div>
@@ -4353,7 +4448,7 @@ export function Dashboard() {
             </p>
             <div className="flex justify-center gap-3">
               <button onClick={() => setShowDeleteCpModal(false)} className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors">Batal</button>
-              <button onClick={handleCpDeleteSubmit} disabled={isLoading} className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg disabled:opacity-50 transition-colors shadow-sm">Ya, Hapus</button>
+              <button onClick={handleCpDeleteSubmit} disabled={isLoading || isUpdating} className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg disabled:opacity-50 transition-colors shadow-sm">Ya, Hapus</button>
             </div>
           </div>
         </div>
@@ -4499,7 +4594,7 @@ export function Dashboard() {
                 </button>
                 <button 
                   type="submit" 
-                  disabled={isLoading} 
+                  disabled={isLoading || isUpdating} 
                   className="px-5 py-2.5 text-xs sm:text-sm font-bold text-white bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 rounded-xl disabled:opacity-50 transition-all shadow-md shadow-violet-500/20 active:scale-95 cursor-pointer flex items-center gap-2"
                 >
                   <Sparkles className="w-4 h-4" />
@@ -4565,7 +4660,7 @@ export function Dashboard() {
                 <button 
                   type="button" 
                   onClick={handleConfirmAddStaff} 
-                  disabled={isLoading} 
+                  disabled={isLoading || isUpdating} 
                   className="w-1/2 py-2.5 text-xs sm:text-sm font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl disabled:opacity-50 transition-all shadow-md shadow-emerald-600/20 active:scale-95 cursor-pointer flex items-center justify-center gap-1.5"
                 >
                   <Check className="w-4 h-4 stroke-[2.5]" />
@@ -4800,7 +4895,7 @@ export function Dashboard() {
                 </button>
                 <button 
                   type="submit" 
-                  disabled={isLoading} 
+                  disabled={isLoading || isUpdating} 
                   className="px-6 py-2.5 text-xs sm:text-sm font-extrabold text-white bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 rounded-xl disabled:opacity-50 transition-all shadow-md shadow-violet-500/20 active:scale-95 cursor-pointer flex items-center gap-2"
                 >
                   <Save className="w-4 h-4" />
@@ -4876,11 +4971,11 @@ export function Dashboard() {
                 <button 
                   type="button" 
                   onClick={handleConfirmSaveStaff} 
-                  disabled={isLoading} 
+                  disabled={isLoading || isUpdating} 
                   className="w-1/2 py-2.5 text-xs sm:text-sm font-bold text-white bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 rounded-xl disabled:opacity-50 transition-all shadow-md shadow-violet-600/20 active:scale-95 cursor-pointer flex items-center justify-center gap-1.5"
                 >
                   <Check className="w-4 h-4 stroke-[2.5]" />
-                  <span>Ya, Simpan ke Sheet</span>
+                  <span>{isUpdating ? 'Memproses…' : 'Ya, Simpan ke Sheet'}</span>
                 </button>
               </div>
             </div>
@@ -4920,11 +5015,11 @@ export function Dashboard() {
               <button 
                 type="button" 
                 onClick={handleDeleteStaffSubmit} 
-                disabled={isLoading} 
+                disabled={isLoading || isUpdating} 
                 className="w-1/2 py-2.5 text-xs sm:text-sm font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-xl disabled:opacity-50 transition-all shadow-md shadow-rose-600/20 active:scale-95 cursor-pointer flex items-center justify-center gap-1.5"
               >
                 <Trash2 className="w-4 h-4" />
-                <span>Ya, Hapus</span>
+                <span>{isUpdating ? 'Menghapus…' : 'Ya, Hapus'}</span>
               </button>
             </div>
           </div>
@@ -4977,14 +5072,15 @@ export function Dashboard() {
               </button>
               <button
                 type="button"
-                disabled={isLoading}
+                disabled={isLoading || isUpdating}
                 onClick={async () => {
+                  if (isUpdating) return;
                   try {
                     await deleteLog(showDeleteLogConfirmModal.id);
-                  } catch (e) {
-                    console.error(e);
-                  } finally {
+                    toast.success('Log berhasil dihapus dari Spreadsheet.');
                     setShowDeleteLogConfirmModal(null);
+                  } catch (e: any) {
+                    toast.error(e?.message || 'Gagal menghapus log.');
                   }
                 }}
                 className="px-4 py-2.5 text-xs font-bold rounded-xl bg-rose-600 hover:bg-rose-700 text-white shadow-md shadow-rose-500/15 flex items-center gap-1.5 transition-colors cursor-pointer"
